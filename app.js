@@ -10,6 +10,10 @@ function el(tag, props = {}, ...kids) {
 }
 const fmtDate = t => new Date(t).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const loadScript = src => new Promise((res, rej) => {
+  if (document.querySelector(`script[data-src="${src}"]`)) return res();
+  const sc = document.createElement('script'); sc.src = src; sc.dataset.src = src; sc.onload = res; sc.onerror = () => { sc.remove(); rej(new Error('No se pudo cargar ' + src + ' (¿sin conexión?)')); }; document.head.append(sc);
+});
 
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>', search: '<circle cx="10" cy="10" r="6"/><path d="M15 15l6 6"/>',
@@ -585,23 +589,28 @@ function shrinkImage(file, max = 1600) {
 /* --- dibujo --- */
 const PEN_COLORS = ['#000000', '#e53935', '#43a047', '#1e88e5', '#fdd835', '#fb8c00', '#8e24aa', '#8d6e63'];
 const pen = { color: '#000000', size: 4, eraser: false };
-function setupCanvas() {
-  const c = $('canvas'), wrap = $('drawWrap'), n = S.cur, ro = n.readonly || !!n.deleted;
-  const resize = () => { c.width = wrap.clientWidth; c.height = wrap.clientHeight; redraw(); };
-  S.redraw = redraw; requestAnimationFrame(resize); S.resize = resize;
-  function redraw() {
-    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
-    for (const s of n.strokes) strokePath(g, s);
-  }
-  function strokePath(g, s) {
-    g.lineCap = g.lineJoin = 'round'; g.strokeStyle = s.c; g.lineWidth = s.w * c.width / 400; g.beginPath();
-    s.p.forEach(([x, y], i) => { const px = x * c.width, py = y * c.width; i ? g.lineTo(px, py) : g.moveTo(px, py); });
-    if (s.p.length === 1) g.lineTo(s.p[0][0] * c.width + .1, s.p[0][1] * c.width);
+// Dibuja un dibujo (imagen de fondo opcional + trazos). 'unit' = píxeles que mide el ancho del dibujo (los trazos se guardan relativos a él).
+function paintDrawing(g, n, bg, W, H, unit) {
+  g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+  if (bg && bg.naturalWidth) { const k = unit / bg.naturalWidth; g.drawImage(bg, 0, 0, bg.naturalWidth * k, bg.naturalHeight * k); }
+  for (const s of n.strokes || []) {
+    g.lineCap = g.lineJoin = 'round'; g.strokeStyle = s.c; g.lineWidth = s.w * unit / 400; g.beginPath();
+    s.p.forEach(([x, y], i) => { const px = x * unit, py = y * unit; i ? g.lineTo(px, py) : g.moveTo(px, py); });
+    if (s.p.length === 1) g.lineTo(s.p[0][0] * unit + .1, s.p[0][1] * unit);
     g.stroke();
   }
+}
+function setupCanvas() {
+  const c = $('canvas'), wrap = $('drawWrap'), n = S.cur, ro = n.readonly || !!n.deleted;
+  const bg = n.bg ? new Image() : null;                    // dibujo importado (p. ej. de Note Everything): imagen de fondo
+  const unit = () => (bg && bg.naturalWidth) ? bg.naturalWidth * Math.min(c.width / bg.naturalWidth, c.height / bg.naturalHeight) : c.width;
+  const redraw = () => paintDrawing(c.getContext('2d'), n, bg, c.width, c.height, unit());
+  const resize = () => { c.width = wrap.clientWidth; c.height = wrap.clientHeight; redraw(); };
+  if (bg) { bg.onload = redraw; bg.src = n.bg; }
+  S.redraw = redraw; requestAnimationFrame(resize); S.resize = resize;
   let cur = null;
-  const pt = e => { const r = c.getBoundingClientRect(); return [(e.clientX - r.left) / c.width, (e.clientY - r.top) / c.width]; };
-  c.onpointerdown = e => { if (ro) return; c.setPointerCapture(e.pointerId); cur = { c: pen.eraser ? '#ffffff' : pen.color, w: pen.size, p: [pt(e)] }; n.strokes.push(cur); strokePath(c.getContext('2d'), cur); };
+  const pt = e => { const r = c.getBoundingClientRect(), u = unit(); return [(e.clientX - r.left) / u, (e.clientY - r.top) / u]; };
+  c.onpointerdown = e => { if (ro) return; c.setPointerCapture(e.pointerId); cur = { c: pen.eraser ? '#ffffff' : pen.color, w: pen.size, p: [pt(e)] }; n.strokes.push(cur); redraw(); };
   c.onpointermove = e => { if (!cur) return; cur.p.push(pt(e)); redraw(); };
   c.onpointerup = c.onpointercancel = () => { if (cur) { cur = null; H.u.push({ t: 'add' }); H.r = []; touch(); } };
   updateDrawStatus();
@@ -979,6 +988,8 @@ function renderSettings() {
   sec('Datos');
   item('Exportar copia de seguridad', 'Archivo JSON con todas las notas, fotos, audios y carpetas', exportBackup);
   item('Importar copia de seguridad', 'Fusiona; si hay conflicto gana la nota más reciente', () => pickFile('application/json', false, importBackup));
+  item('Importar desde Note Everything (ZIP)', 'Copia manual de la app oficial (manualbackup_….zip)', () => pickFile('.zip,application/zip', false, async f => { try { await loadScript('ne.js'); neImport(f); } catch (e) { toast(e.message); } }));
+  item('Exportar para Note Everything (ZIP)', 'Crea un backup que la app oficial puede restaurar', async () => { try { await loadScript('ne.js'); neExport(); } catch (e) { toast(e.message); } });
   item('Importar archivos de texto (.txt)', 'Uno o varios; cada archivo crea una nota', () => pickFile('.txt,text/plain', true, importTxt));
   item('Vaciar papelera', '', emptyTrash);
   sec('Sincronización');
