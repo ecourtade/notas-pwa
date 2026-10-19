@@ -852,8 +852,11 @@ function updateMini() {
   const rc = sel.getRangeAt(0).getBoundingClientRect(); if (!rc.width && !rc.height) { m.hidden = true; return; }
   m.hidden = false;
   const w = m.offsetWidth, h = m.offsetHeight;
-  let top = rc.bottom + 44;                                  // debajo de la selección (arriba está el menú nativo de Android)
-  if (top + h > innerHeight - 70) top = Math.max(60, rc.top - h - 52);
+  // El menú nativo de Android (Cortar/Copiar/Pegar) va encima de la selección si hay sitio y, si no, debajo.
+  // Colocamos esta barra en el lado contrario para que no se superpongan.
+  const nativeBelow = rc.top < 150;
+  let top = nativeBelow ? rc.bottom + 130 : rc.bottom + 48;
+  if (top + h > innerHeight - 60) top = nativeBelow ? Math.max(60, innerHeight - h - 70) : Math.max(60, rc.top - h - 90);
   m.style.left = Math.max(4, Math.min(innerWidth - w - 4, rc.left + rc.width / 2 - w / 2)) + 'px'; m.style.top = top + 'px';
 }
 
@@ -966,6 +969,7 @@ function renderSettings() {
   sec('Sincronización');
   item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
   item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
+  item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
   item('Cerrar sesión de Google', '', googleSignOut);
   sec('Acerca de');
   item('Notas', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
@@ -1062,11 +1066,11 @@ async function getToken() {
   await loadGIS();
   return new Promise((res, rej) => {
     const tc = google.accounts.oauth2.initTokenClient({
-      client_id: cid, scope: 'https://www.googleapis.com/auth/drive.appdata',
+      client_id: cid, scope: 'https://www.googleapis.com/auth/drive.appdata', hint: pref('gemail') || undefined,
       callback: r => { if (r.error) rej(new Error(r.error_description || r.error)); else { gToken = r.access_token; gExp = Date.now() + r.expires_in * 1000; res(gToken); } },
       error_callback: e => rej(new Error(e.type === 'popup_closed' ? 'Cancelaste el inicio de sesión' : (e.message || e.type))),
     });
-    tc.requestAccessToken({ prompt: gToken === null && !pref('gconsent') ? 'consent' : '' });
+    tc.requestAccessToken({ prompt: pref('gconsent') ? '' : 'select_account' });
   });
 }
 async function gfetch(url, opts = {}) {
