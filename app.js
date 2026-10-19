@@ -1119,8 +1119,13 @@ async function syncDrive() {
 async function setClientId(first) {
   const v = await ask(first ? 'Para sincronizar pega tu ID de cliente de Google (termina en .apps.googleusercontent.com)' : 'ID de cliente de Google', pref('gclient') || '');
   if (v === null) return;
-  pref('gclient', v.trim()); gToken = null; pref('gconsent', '');
-  if (first && v.trim()) syncDrive();
+  const id = v.trim().replace(/\s+/g, '');
+  if (id && !/^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/i.test(id)) {
+    await info('ID no válido', 'Un ID de cliente tiene este aspecto:\n123456789012-abcdefg1234567.apps.googleusercontent.com\n\nCópialo completo desde Google Cloud: Google Auth Platform → Clientes → tu cliente de tipo "Aplicación web". No sirve el ID del proyecto ni el secreto del cliente.');
+    return;
+  }
+  pref('gclient', id); gToken = null; pref('gconsent', '');
+  if (first && id) syncDrive();
 }
 function googleSignOut() {
   if (gToken && window.google && google.accounts) google.accounts.oauth2.revoke(gToken, () => {});
