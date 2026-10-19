@@ -238,6 +238,7 @@ function renderMain() {
   $('folderBar').innerHTML = ic(S.view.kind === 'trash' ? 'trash' : 'folder');
   $('folderBar').append(' ' + viewName());
   $('folderBar').onclick = () => pickFolder();
+  updateSyncStat();
   const list = $('list'); list.replaceChildren();
   const rows = [];
   if (S.view.kind === 'folder' && !S.q) for (const f of childFolders(S.view.id)) {
@@ -996,13 +997,28 @@ function renderSettings() {
   item('Recuperación de contraseñas', recOn() ? 'Configurada · clave partida en correo + WhatsApp/SMS' : 'No configurada', recoveryMenu);
   sec('Protección de los datos');
   item('Carpeta espejo en el PC (recomendado)', dirSupported() ? (mir.dir ? 'Activa: ' + mir.dir.name + ' — copia viva fuera del navegador' : 'No configurada: guarda cada nota como archivo en una carpeta del disco') : 'Solo en Chrome o Edge de PC', mirrorMenu);
-  sec('Copias de seguridad automáticas');
-  item('Copia automática', bk.on ? 'Activada' : 'Desactivada', () => { pref('bk_on', bk.on ? '0' : '1'); renderSettings(); });
-  item('Frecuencia', bk.days === 1 ? 'Cada día' : `Cada ${bk.days} días`, () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref('bk_days', String(d)); renderSettings(); } }))));
-  item('Copias que se conservan', String(bk.keep), () => menu([3, 7, 14, 30].map(k => ({ t: k + ' copias', fn: () => { pref('bk_keep', String(k)); renderSettings(); } }))));
+  const freq = (key, cur) => () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref(key, String(d)); renderSettings(); } })));
+  const keepMenu = key => () => menu([3, 7, 14, 30].map(k => ({ t: k + ' copias', fn: () => { pref(key, String(k)); renderSettings(); } })));
+  const label = d => d === 1 ? 'Cada día' : `Cada ${d} días`;
+  sec('Copia interna (en este dispositivo)');
+  item('Activada', bk.on ? 'Sí' : 'No', () => { pref('bk_on', bk.on ? '0' : '1'); renderSettings(); });
+  item('Frecuencia', label(bk.days), freq('bk_days'));
+  item('Hora', bk.time + ' · si la app estaba cerrada, se hace al abrirla', async () => { const v = await askTime('Hora de la copia interna', bk.time); if (v) { pref('bk_time', v); renderSettings(); } });
+  item('Copias que se conservan', String(bk.keep), keepMenu('bk_keep'));
   item('Hacer una copia ahora', pref('bk_last') ? 'Última: ' + fmtDate(+pref('bk_last')) : 'Aún no hay copias', async () => { await runBackup(true); renderSettings(); });
   item('Ver y restaurar copias', 'Se guardan dentro de la app, en este dispositivo', backupsMenu);
-  if (dirSupported()) item('Carpeta de copias en el PC', 'Además guarda un archivo .json en una carpeta que elijas', chooseBackupFolder);
+  sec('Copia JSON diaria (archivo)');
+  item('Activada', bj.on ? 'Sí' : 'No', () => { pref('bj_on', bj.on ? '0' : '1'); renderSettings(); });
+  item('Frecuencia', label(bj.days), freq('bj_days'));
+  item('Hora', bj.time + ' · si no hay internet o la app está cerrada, se hace en cuanto se pueda', async () => { const v = await askTime('Hora de la copia JSON', bj.time); if (v) { pref('bj_time', v); renderSettings(); } });
+  item('Copias que se conservan', String(bj.keep), keepMenu('bj_keep'));
+  item('Guardar en Google Drive', bj.drive ? 'Sí (carpeta privada de la app en tu Drive)' : 'No', () => { pref('bj_drive', bj.drive ? '0' : '1'); renderSettings(); });
+  if (dirSupported()) item('Guardar en una carpeta del PC', bj.pc ? 'Sí · toca para elegir o cambiar la carpeta' : 'No · toca para elegir la carpeta', () => menu([
+    { t: 'Elegir o cambiar la carpeta', fn: async () => { await chooseBackupFolder(); renderSettings(); } },
+    { t: bj.pc ? 'No guardar en el PC' : 'Guardar también en el PC', fn: () => { pref('bj_pc', bj.pc ? '0' : '1'); renderSettings(); } },
+  ]));
+  item('Hacer una copia JSON ahora', pref('bj_last') ? 'Última: ' + fmtDate(+pref('bj_last')) : 'Aún no hay copias JSON', async () => { await runJsonBackup(true, false); renderSettings(); });
+  item('Ver y restaurar copias de Drive', 'Copias JSON guardadas en tu Google Drive', driveBackupsMenu);
   sec('Datos');
   item('Exportar copia de seguridad', 'Archivo JSON con todas las notas, fotos, audios y carpetas', exportBackup);
   item('Importar copia de seguridad', 'Fusiona; si hay conflicto gana la nota más reciente', () => pickFile('application/json', false, importBackup));
@@ -1143,7 +1159,7 @@ async function syncDrive(opts) {
   if (syncing) return;
   if (!pref('gclient')) { if (auto) return; await setClientId(true); if (!pref('gclient')) return; }
   if (!navigator.onLine) { if (!auto) toast('Sin conexión a internet'); return; }
-  syncing = true; S.dirty = false; $('syncBtn').classList.add('spin'); if (!auto) toast('Sincronizando…');
+  syncing = true; S.dirty = false; $('syncBtn').classList.add('spin'); updateSyncStat(); if (!auto) toast('Sincronizando…');
   try {
     await getToken(auto); pref('gconsent', '1');
     const q = encodeURIComponent(`name='${DRIVE_FILE}'`);
@@ -1179,16 +1195,17 @@ async function syncDrive(opts) {
         await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + bd }, body: mp });
       }
     }
-    pref('lastSync', String(Date.now()));
+    pref('lastSync', String(Date.now())); pref('lastSyncErr', '');
     syncLog({ down: m.applyLocal.length, del: m.delLocal.length, up: m.upload ? m.notes.length : 0, total: S.notes.length });
     if (!auto || m.applyLocal.length || m.delLocal.length) toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`);
     renderMain();
   } catch (e) {
+    if (!/popup|interaction|login_required|consent|internet|network|fetch/i.test(e.message)) pref('lastSyncErr', e.message);
     if (auto) {
       // Google exige un gesto del usuario para abrir su ventana: se reintenta con el primer toque.
       if (/popup|interaction|login_required|consent/i.test(e.message)) armFirstTap(); else if (!/internet|network|fetch/i.test(e.message)) toast('Toca ⟳ para volver a conectar con Google');
     } else toast(e.message === 'noclient' ? 'Falta el ID de cliente de Google' : 'No se pudo sincronizar: ' + e.message);
-  } finally { syncing = false; $('syncBtn').classList.remove('spin'); }
+  } finally { syncing = false; $('syncBtn').classList.remove('spin'); updateSyncStat(); }
 }
 let tapArmed = false;
 function armFirstTap() {
@@ -1275,7 +1292,7 @@ function histKeys(e) {
 
 /* ============ Copias de seguridad automáticas ============ */
 const bk = {
-  get on() { return pref('bk_on') !== '0' }, get days() { return +pref('bk_days') || 1 }, get keep() { return +pref('bk_keep') || 7 },
+  get on() { return pref('bk_on') !== '0' }, get days() { return +pref('bk_days') || 1 }, get keep() { return +pref('bk_keep') || 7 }, get time() { return pref('bk_time') || '02:00'; },
 };
 const dirSupported = () => 'showDirectoryPicker' in window;
 const pad2 = n => String(n).padStart(2, '0');
@@ -1286,7 +1303,7 @@ async function gunzipText(blob) { const st = blob.stream().pipeThrough(new Decom
 
 async function runBackup(force, silent) {
   if (!DB.idb) { if (force && !silent) toast('Este navegador no permite guardar copias internas'); return; }
-  const due = bk.on && Date.now() - (+pref('bk_last') || 0) >= bk.days * 864e5 - 36e5;
+  const due = bk.on && Date.now() >= nextDue(+pref('bk_last') || 0, bk.days, bk.time);
   if (!force && (!due || !S.notes.length)) return;
   const json = backupJSON(), ts = Date.now(), name = `notas-copia-${stamp(new Date(ts))}.json`;
   let blob = new Blob([json], { type: 'application/json' }), gz = false;
@@ -1295,7 +1312,6 @@ async function runBackup(force, silent) {
   pref('bk_last', String(ts));
   const all = (await DB.all('backups')).sort((a, b) => b.ts - a.ts);
   for (const old of all.slice(bk.keep)) await DB.del('backups', old.id);
-  await folderWrite(name, json, false);
   if (force && !silent) toast('Copia de seguridad creada');
 }
 // Carpeta del PC (Chrome/Edge de escritorio): requiere permiso del usuario, que se renueva con un toque.
@@ -1321,7 +1337,7 @@ function armFolderTap() {
 async function chooseBackupFolder() {
   try {
     const handle = await showDirectoryPicker({ mode: 'readwrite', id: 'notas-backups' });
-    await DB.put('meta', { id: 'bkdir', handle }); toast('Carpeta elegida: ' + handle.name); await runBackup(true);
+    await DB.put('meta', { id: 'bkdir', handle }); pref('bj_pc', '1'); toast('Carpeta elegida: ' + handle.name); await runJsonBackup(true);
   } catch (e) { if (e.name !== 'AbortError') toast('No se pudo elegir la carpeta'); }
 }
 async function backupText(b) { return b.gz ? gunzipText(b.blob) : b.blob.text(); }
@@ -1710,10 +1726,99 @@ function scheduleSync() {
   S.syncT = setTimeout(() => { if (typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); }, 45000);
 }
 
+/* ============ Horarios de copias, copia JSON diaria y estado de la sincronización ============ */
+// Una web no puede ejecutarse con la app cerrada: la hora elegida es "a partir de cuándo toca". Si la app estaba cerrada
+// o no había internet a esa hora, la copia se hace en cuanto se abre la app o vuelve la conexión.
+const bj = {
+  get on() { return pref('bj_on') !== '0'; }, get days() { return +pref('bj_days') || 1; }, get keep() { return +pref('bj_keep') || 7; },
+  get time() { return pref('bj_time') || '03:00'; }, get drive() { return pref('bj_drive') !== '0'; }, get pc() { return pref('bj_pc') !== '0'; },
+};
+// Próximo momento en que toca una copia: la primera vez que sea HH:MM después de la última, más (días-1) días.
+function nextDue(last, days, time) {
+  if (!last) return 0;
+  const [h, m] = (/^\d{1,2}:\d{2}$/.test(time || '') ? time : '02:00').split(':').map(Number);
+  const d = new Date(last); d.setHours(h, m, 0, 0);
+  if (d.getTime() <= last) d.setDate(d.getDate() + 1);
+  d.setDate(d.getDate() + Math.max(0, days - 1)); return d.getTime();
+}
+const askTime = async (title, cur) => { const v = await ask(title, cur, 'time'); return v && /^\d{1,2}:\d{2}$/.test(v) ? v : null; };
+
+async function driveUploadJson(name, json) {
+  const bd = 'nb' + Date.now();
+  const mp = `--${bd}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name, parents: ['appDataFolder'], mimeType: 'application/json' })}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${json}\r\n--${bd}--`;
+  await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + bd }, body: mp });
+}
+async function driveListJson() {
+  const q = encodeURIComponent("name contains 'notas-copia-'");
+  const r = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime%20desc&pageSize=100`)).json();
+  return r.files || [];
+}
+async function drivePruneJson(keep) { for (const f of (await driveListJson()).slice(keep)) await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' }); }
+
+let bjRunning = false, bjTapArmed = false;
+function armBjTap() {
+  if (bjTapArmed) return; bjTapArmed = true;
+  document.addEventListener('pointerup', () => { bjTapArmed = false; runJsonBackup(false, true); }, { once: true });
+}
+async function runJsonBackup(force, auto) {
+  if (bjRunning) return;
+  if (!force && (!bj.on || !S.notes.length || Date.now() < nextDue(+pref('bj_last') || 0, bj.days, bj.time))) return;
+  const dest = { drive: bj.drive && !!pref('gclient') && !!pref('gconsent'), pc: bj.pc && !!(await folderHandle()) };
+  if (!dest.drive && !dest.pc) { if (force) toast('Elige dónde guardar la copia: Google Drive o una carpeta del PC'); return; }
+  bjRunning = true;
+  try {
+    const json = backupJSON(), ts = +pref('bj_try') || Date.now(); pref('bj_try', String(ts));   // mismo nombre en los reintentos
+    const name = `notas-copia-${stamp(new Date(ts))}.json`;
+    let okPc = !dest.pc, okDrive = !dest.drive;
+    if (dest.pc) { await folderWrite(name, json, false); okPc = !folderPending; }
+    if (dest.drive) {
+      if (!navigator.onLine) throw new Error('offline');
+      await getToken(auto); await driveUploadJson(name, json); okDrive = true;
+      try { await drivePruneJson(bj.keep); } catch (e) {}
+    }
+    if (okPc && okDrive) { pref('bj_last', String(Date.now())); pref('bj_try', ''); pref('bj_pending', '0'); if (force) toast('Copia JSON guardada'); }
+    else pref('bj_pending', '1');
+  } catch (e) {
+    pref('bj_pending', '1');
+    if (/popup|interaction|login_required|consent/i.test(e.message)) armBjTap();
+    else if (force) toast(e.message === 'offline' ? 'Sin internet: la copia se hará en cuanto vuelva la conexión' : 'Copia JSON: ' + e.message);
+  } finally { bjRunning = false; updateSyncStat(); }
+}
+function checkSchedules() { runBackup(false).catch(() => {}); runJsonBackup(false, true).catch(() => {}); }
+
+async function driveBackupsMenu() {
+  try {
+    await getToken(false); const l = await driveListJson();
+    if (!l.length) { toast('Aún no hay copias JSON en Google Drive'); return; }
+    menu(l.map(f => ({ t: `${fmtDate(Date.parse(f.createdTime))} · ${Math.max(1, Math.round((+f.size || 0) / 1024))} KB`, fn: () => menu([
+      { t: 'Restaurar esta copia', fn: async () => {
+        if (!(await confirmD('Las notas de esta copia sustituirán a las actuales con el mismo identificador. Las notas nuevas que no estén en la copia se conservan. ¿Continuar?'))) return;
+        try { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).json(); await applyBackupData(d, true); renderMain(); toast('Copia restaurada'); } catch (e) { toast('No se pudo restaurar: ' + e.message); }
+      } },
+      { t: 'Descargar archivo', fn: async () => { try { download(f.name, await (await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).blob()); } catch (e) { toast(e.message); } } },
+      { t: 'Eliminar esta copia', fn: async () => { try { await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' }); toast('Copia eliminada'); } catch (e) { toast(e.message); } } },
+    ]) })));
+  } catch (e) { toast(e.message === 'popup' ? 'Toca de nuevo para iniciar sesión con Google' : 'No se pudo leer Drive: ' + e.message); }
+}
+
+// --- barra de estado de la sincronización (pantalla principal) ---
+function updateSyncStat() {
+  const e = $('syncBar'); if (!e) return;
+  const last = +pref('lastSync') || 0, err = pref('lastSyncErr');
+  let t, cls = '';
+  if (!pref('gclient')) t = '☁ Sincronización no configurada (toca para configurarla)';
+  else if (syncing) t = '☁ Sincronizando…';
+  else if (err) { t = '⚠ La última sincronización falló' + (last ? ' · última correcta: ' + fmtDate(last) : ''); cls = 'warn'; }
+  else if (!navigator.onLine && S.dirty) { t = '⏳ Sin conexión: se sincronizará al volver' + (last ? ' · última: ' + fmtDate(last) : ''); cls = 'warn'; }
+  else t = last ? '☁ Última sincronización: ' + fmtDate(last) : '☁ Sin sincronizar todavía';
+  if (pref('bj_pending') === '1' && bj.on) t += ' · copia JSON pendiente';
+  e.textContent = t; e.className = cls;
+}
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
-  $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu; $('syncBtn').onclick = syncDrive;
+  $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu; $('syncBtn').onclick = syncDrive; $('syncBar').onclick = () => syncDrive();
   $('folderBtn').onclick = () => pickFolder();
   $('searchBtn').onclick = () => { const b = $('searchBar'); b.hidden = !b.hidden; if (b.hidden) { S.q = ''; $('searchInput').value = ''; renderMain(); } else $('searchInput').focus(); };
   $('searchInput').oninput = e => { S.q = e.target.value; renderMain(); };
@@ -1765,7 +1870,7 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); if (S.dirty && typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); if (S.dirty && typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); checkSchedules(); } });
   addEventListener('pagehide', () => { flush().catch(() => {}); if (!window.__dropPending) markCount(); });
 }
 
@@ -1807,6 +1912,8 @@ async function init() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
   checkReminders(); setInterval(checkReminders, 30000);
   if (pref('autosync') !== '0' && pref('gclient') && pref('gconsent')) syncDrive({ auto: true });
-  runBackup(false).catch(() => {});   // sincroniza al abrir la app
+    checkSchedules(); setInterval(checkSchedules, 60000);
+  addEventListener('online', () => { checkSchedules(); if (pref('autosync') !== '0' && pref('gclient') && pref('gconsent')) syncDrive({ auto: true }); updateSyncStat(); });
+  addEventListener('offline', updateSyncStat);
 }
 init();
