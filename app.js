@@ -26,12 +26,14 @@ const ICONS = {
   play: '<path d="M7 4l13 8-13 8z" fill="currentColor"/>', stop: '<rect x="6" y="6" width="12" height="12" fill="currentColor"/>',
   rec: '<circle cx="12" cy="12" r="8" fill="currentColor"/>', undo: '<path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3"/>',
   bell: '<path d="M6 16v-5a6 6 0 0112 0v5l2 2H4zM10 21h4"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
+  sync: '<path d="M20 11a8 8 0 00-14-4M4 4v4h4M4 13a8 8 0 0014 4M20 20v-4h-4"/>', brush: '<path d="M4 20l5-1 9-9-4-4-9 9zM14 6l4 4"/>',
+  link: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
   sort: '<path d="M4 6h16M4 12h11M4 18h6"/>', selall: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 12l4 4 6-8"/>',
   move: '<path d="M3 6h7l2 2h9v11H3z"/><path d="M9 14h7M13 11l3 3-3 3"/>',
 };
 const ic = n => `<svg class="ic" viewBox="0 0 24 24">${ICONS[n]}</svg>`;
 const setIcons = () => {
-  const map = { addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
+  const map = { syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
     edBack: 'back', edDel: 'trash', edShare: 'share', edInfo: 'info', edMore: 'more', findPrev: 'up', findNext: 'down', addItem: 'plus', addMic: 'mic', addSort: 'sort', fdBack: 'back', fdMore: 'more', stBack: 'back' };
   for (const [id, n] of Object.entries(map)) $(id).innerHTML = ic(n);
 };
@@ -288,13 +290,13 @@ function sortMenu() {
 async function emptyTrash() {
   const ts = S.notes.filter(n => n.deleted);
   if (!ts.length || !(await confirmD(`¿Eliminar definitivamente ${ts.length} notas?`))) return;
-  for (const n of ts) await DB.del('notes', n.id);
+  for (const n of ts) await forgetNote(n.id);
   S.notes = S.notes.filter(n => !n.deleted); renderMain();
 }
 async function trashNotes(ns) {
   if (S.view.kind === 'trash') {
     if (!(await confirmD(`¿Eliminar definitivamente ${ns.length} nota(s)?`))) return;
-    for (const n of ns) await DB.del('notes', n.id);
+    for (const n of ns) await forgetNote(n.id);
     S.notes = S.notes.filter(n => !ns.includes(n));
   } else {
     for (const n of ns) { n.deleted = Date.now(); await persist(n); }
@@ -350,7 +352,7 @@ function folderMenu(f, choose) {
       const par = f.parent || 'main';
       for (const c of S.folders.filter(x => x.parent === f.id)) { c.parent = f.parent; await DB.put('folders', c); }
       for (const n of S.notes.filter(n => n.folder === f.id)) { n.folder = par; await persist(n); }
-      S.folders = S.folders.filter(x => x !== f); await DB.del('folders', f.id);
+      S.folders = S.folders.filter(x => x !== f); await forgetFolder(f.id);
       if (S.view.id === f.id) S.view = { kind: 'all', id: null };
       redo();
     } },
@@ -410,7 +412,7 @@ async function leaveEditor(keepStack) {
   const n = S.cur; if (!n) return;
   stopRec(true); stopAudio(); clearTimeout(S.timer);
   if (!n.deleted && isEmpty(n) && !(n.enc)) {
-    if (S.notes.includes(n)) { S.notes = S.notes.filter(x => x !== n); await DB.del('notes', n.id); }
+    if (S.notes.includes(n)) { S.notes = S.notes.filter(x => x !== n); await forgetNote(n.id); }
   } else if (!n.deleted || S.notes.includes(n)) {
     if (S.notes.includes(n) || !isEmpty(n)) await persist(n);
   }
@@ -446,6 +448,7 @@ function renderView() {
   const n = S.cur, v = $('edView'), q = S.find && S.find.q;
   v.innerHTML = sanitize(n.html || textToHtml(n.body));
   const marks = decorate(v, q);
+  v.querySelectorAll('a[href]').forEach(a => a.onclick = e => { e.preventDefault(); openHref(a.getAttribute('href')); });
   if (S.find) { S.find.marks = marks; S.find.i = Math.min(S.find.i || 0, Math.max(0, marks.length - 1)); focusMark(); }
 }
 // Convierte enlaces en <a> y resalta la búsqueda dentro de un árbol HTML (conserva el formato).
@@ -454,7 +457,7 @@ function decorate(root, q) {
   while (w.nextNode()) nodes.push(w.currentNode);
   const ql = q ? q.toLowerCase() : '';
   for (const tn of nodes) {
-    const text = tn.data, links = findLinks(text), frag = document.createDocumentFragment();
+    const text = tn.data, links = tn.parentElement.closest('a') ? [] : findLinks(text), frag = document.createDocumentFragment();
     const plain = (s, e) => {
       const seg = text.slice(s, e);
       if (!ql) { frag.append(seg); return; }
@@ -617,10 +620,12 @@ function drawTools() {
 }
 
 /* ============ Texto con formato ============ */
-const OK_TAGS = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'SPAN', 'FONT', 'DIV', 'P', 'BR', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'SUB', 'SUP']);
+const OK_TAGS = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'SPAN', 'FONT', 'DIV', 'P', 'BR', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'SUB', 'SUP', 'A']);
 const OK_CSS = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style', 'text-decoration', 'text-decoration-line', 'text-align'];
 const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escAttr = s => escHtml(s).replace(/"/g, '&quot;');
 const textToHtml = t => escHtml(t || '').replace(/\n/g, '<br>');
+const SAFE_HREF = /^(https?:|mailto:|tel:)/i;
 function sanitize(html) {
   const t = document.createElement('template'); t.innerHTML = html || ''; clean(t.content); return t.innerHTML;
 }
@@ -635,15 +640,18 @@ function clean(node) {
         const keep = [];
         for (const p of OK_CSS) { const v = c.style.getPropertyValue(p); if (v && !/url\(|expression|javascript|@import/i.test(v)) keep.push(p + ':' + v); }
         keep.length ? c.setAttribute('style', keep.join(';')) : c.removeAttribute('style');
-      } else if (!(c.tagName === 'FONT' && ['size', 'color', 'face'].includes(a.name))) c.removeAttribute(a.name);
+      } else if (c.tagName === 'A' && a.name === 'href') { if (!SAFE_HREF.test(a.value.trim())) c.removeAttribute('href'); }
+      else if (!(c.tagName === 'FONT' && ['size', 'color', 'face'].includes(a.name))) c.removeAttribute(a.name);
     }
   }
 }
 function setRich(n) { $('edText').innerHTML = sanitize(n.html || textToHtml(n.body)); }
+function openHref(h) { if (/^(mailto|tel):/i.test(h)) location.href = h; else window.open(h, '_blank', 'noopener'); }
+
 let pendingSize = 0;
 function onRichInput() {
   const r = $('edText'), n = S.cur; if (!n) return;
-  fixSizeTags(r);
+  fixSizeTags(r); autolink(r);
   n.body = r.innerText.replace(/ /g, ' ');
   n.html = n.body.trim() ? r.innerHTML : '';
   touch(); $('edTitle').textContent = noteTitle(n);
@@ -659,15 +667,84 @@ function fixSizeTags(root) {
   });
   if (last && sel.isCollapsed !== false) { const r = document.createRange(); r.selectNodeContents(last); r.collapse(false); sel.removeAllRanges(); sel.addRange(r); }
 }
+
+// --- detección automática de enlaces mientras se escribe (URLs y correos) ---
+const AUTO_RE = [/\b(?:https?:\/\/|www\.)[^\s<>"']+[^\s<>"'.,;:!?)]/gi, /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g];
+const hrefFor = s => /^https?:\/\//i.test(s) ? s : /^www\./i.test(s) ? 'https://' + s : 'mailto:' + s;
+function autolink(root) {
+  if (!/:\/\/|www\.|@/.test(root.textContent)) return;
+  const sel = getSelection(), cNode = sel.rangeCount ? sel.anchorNode : null, cOff = sel.rangeCount ? sel.anchorOffset : 0;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [];
+  while (w.nextNode()) if (!w.currentNode.parentElement.closest('a')) nodes.push(w.currentNode);
+  for (const tn of nodes) {
+    const text = tn.data, ms = [];
+    for (const re of AUTO_RE) {
+      re.lastIndex = 0; let m;
+      while ((m = re.exec(text))) {
+        const s = m.index, e = s + m[0].length;
+        if (tn === cNode && cOff >= s && cOff <= e) continue;   // aún se está escribiendo
+        const after = /^[.,;:!?)]*(\s|$)/.exec(text.slice(e));  // solo se enlaza al terminar la palabra
+        if (!after || (!after[1] && tn === cNode)) continue;
+        ms.push({ s, e, v: m[0] });
+      }
+    }
+    if (!ms.length) continue;
+    ms.sort((a, b) => a.s - b.s);
+    const frag = document.createDocumentFragment(); let pos = 0, target = null;
+    const addText = (s, e) => {
+      if (e <= s) return; const node = document.createTextNode(text.slice(s, e)); frag.append(node);
+      if (tn === cNode && !target && cOff >= s && cOff <= e) target = [node, cOff - s];
+    };
+    for (const m of ms) { if (m.s < pos) continue; addText(pos, m.s); frag.append(el('a', { href: hrefFor(m.v), textContent: m.v })); pos = m.e; }
+    addText(pos, text.length); tn.replaceWith(frag);
+    if (target) { const r = document.createRange(); r.setStart(target[0], target[1]); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }
+  }
+}
 function onRichPaste(e) {
   e.preventDefault();
   const html = e.clipboardData.getData('text/html'), text = e.clipboardData.getData('text/plain');
   document.execCommand('insertHTML', false, html ? sanitize(html) : textToHtml(text));
+  setTimeout(onRichInput, 0);
 }
-let savedRange = null;
+
+// --- vínculos al estilo Gmail ---
+function normHref(v) {
+  v = v.trim(); if (!v) return '';
+  if (/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(v)) return 'mailto:' + v;
+  if (/^\+?[\d ()-]{6,}$/.test(v)) return 'tel:' + v.replace(/[^\d+]/g, '');
+  return SAFE_HREF.test(v) ? v : 'https://' + v;
+}
+async function linkDialog(existing) {
+  const sel0 = savedRange ? savedRange.toString() : '';
+  const t = el('input', { value: existing ? existing.textContent : sel0, placeholder: 'Texto a mostrar' });
+  const u = el('input', { type: 'text', value: existing ? existing.getAttribute('href') || '' : '', placeholder: 'https://…, correo o teléfono' });
+  const body = el('div', {}, el('p', { textContent: 'Texto a mostrar' }), t, el('p', { textContent: 'Dirección del vínculo' }), u);
+  const btns = [{ t: 'Cancelar', v: null }]; if (existing) btns.push({ t: 'Quitar vínculo', v: 'rm' }); btns.push({ t: 'Aceptar', v: 'ok' });
+  const p = dialog(existing ? 'Editar vínculo' : 'Insertar vínculo', body, btns);
+  setTimeout(() => (existing || sel0 ? u : t).focus(), 60);
+  const r = await p; if (!r) return;
+  if (r === 'rm') { existing.replaceWith(...existing.childNodes); onRichInput(); return; }
+  const href = normHref(u.value); if (!href) { toast('Falta la dirección del vínculo'); return; }
+  const text = t.value.trim() || u.value.trim();
+  if (existing) { existing.setAttribute('href', href); existing.textContent = text; onRichInput(); return; }
+  restoreSel(); document.execCommand('insertHTML', false, `<a href="${escAttr(href)}">${escHtml(text)}</a>&nbsp;`); onRichInput();
+}
+function linkMenu(a) {
+  const href = a.getAttribute('href') || '';
+  menu([{ t: 'Abrir: ' + (href.length > 34 ? href.slice(0, 34) + '…' : href), fn: () => href && openHref(href) },
+    { t: 'Editar vínculo', fn: () => linkDialog(a) },
+    { t: 'Quitar vínculo', fn: () => { a.replaceWith(...a.childNodes); onRichInput(); } }]);
+}
+
+// --- selección, formato y estado ---
+let savedRange = null, miniRaf = 0, painter = null;
 function onSelChange() {
   const r = $('edText'), sel = getSelection();
-  if (sel.rangeCount && r.contains(sel.anchorNode)) { savedRange = sel.getRangeAt(0).cloneRange(); updateFmtState(); }
+  if (sel.rangeCount && r.contains(sel.anchorNode)) {
+    savedRange = sel.getRangeAt(0).cloneRange(); updateFmtState();
+    if (painter && !sel.isCollapsed) { clearTimeout(painter.t); painter.t = setTimeout(applyPainter, 700); }
+  }
+  cancelAnimationFrame(miniRaf); miniRaf = requestAnimationFrame(updateMini);
 }
 function restoreSel() {
   const r = $('edText'); r.focus();
@@ -677,8 +754,18 @@ function fmt(cmd, val, css = true) {
   restoreSel(); document.execCommand('styleWithCSS', false, css); document.execCommand(cmd, false, val || null);
   onRichInput(); updateFmtState();
 }
+function selStyle() {
+  let n = savedRange ? savedRange.startContainer : null; if (!n) return null;
+  if (n.nodeType === 3) n = n.parentElement; return n && $('edText').contains(n) ? getComputedStyle(n) : null;
+}
+const curSize = () => { const cs = selStyle(); return cs ? Math.round(parseFloat(cs.fontSize)) : 17; };
 function updateFmtState() {
-  document.querySelectorAll('#fmtBar [data-cmd]').forEach(b => { let on = false; try { on = document.queryCommandState(b.dataset.cmd); } catch (e) {} b.classList.toggle('on', on); });
+  document.querySelectorAll('[data-cmd]').forEach(b => { let on = false; try { on = document.queryCommandState(b.dataset.cmd); } catch (e) {} b.classList.toggle('on', on); });
+  const cs = selStyle(); if (!cs) return;
+  const fam = cs.fontFamily.split(',')[0].replace(/["']/g, '').trim();
+  const famLabel = /^(system-ui|sans-serif)$/i.test(fam) ? 'Predet.' : fam;
+  document.querySelectorAll('[data-role=font]').forEach(b => b.textContent = famLabel.length > 10 ? famLabel.slice(0, 9) + '…' : famLabel);
+  document.querySelectorAll('[data-role=size]').forEach(b => b.textContent = Math.round(parseFloat(cs.fontSize)));
 }
 const FONTS = [['Predeterminada', 'sans-serif'], ['Serif', 'Georgia, serif'], ['Monoespaciada', '"Courier New", monospace'], ['Manuscrita', '"Comic Sans MS", cursive'], ['Arial', 'Arial, sans-serif'], ['Verdana', 'Verdana, sans-serif'], ['Times New Roman', '"Times New Roman", serif']];
 const SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64];
@@ -692,25 +779,82 @@ function colorPick(title, cmd, withNone) {
 }
 function setSize(px) {
   pendingSize = px; restoreSel();
-  document.execCommand('styleWithCSS', false, false); document.execCommand('fontSize', false, '7'); onRichInput();
+  document.execCommand('styleWithCSS', false, false); document.execCommand('fontSize', false, '7'); onRichInput(); updateFmtState();
+}
+function stepSize(d) {
+  const cur = curSize(); let i = SIZES.findIndex(s => s >= cur); if (i < 0) i = SIZES.length - 1;
+  if (d > 0 && SIZES[i] <= cur) i++; else if (d < 0) i--;
+  setSize(SIZES[Math.max(0, Math.min(SIZES.length - 1, i))]);
+}
+
+// --- copiar formato (como en Word) ---
+function togglePainter() {
+  if (painter) { clearTimeout(painter.t); painter = null; paintBtns(); toast('Copiar formato cancelado'); return; }
+  const cs = selStyle(); if (!cs) { toast('Coloca el cursor en el texto cuyo formato quieres copiar'); return; }
+  let bg = 'transparent', n = savedRange.startContainer; if (n.nodeType === 3) n = n.parentElement;
+  for (; n && n !== $('edText'); n = n.parentElement) { const b = getComputedStyle(n).backgroundColor; if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') { bg = b; break; } }
+  const deco = cs.textDecorationLine || '';
+  painter = { t: 0, f: { bold: parseInt(cs.fontWeight) >= 600, italic: cs.fontStyle === 'italic', underline: deco.includes('underline'), strike: deco.includes('line-through'), color: cs.color, bg, family: cs.fontFamily, size: Math.round(parseFloat(cs.fontSize)) } };
+  paintBtns(); toast('Formato copiado. Ahora selecciona el texto al que quieres aplicarlo');
+}
+function paintBtns() { document.querySelectorAll('[data-role=painter]').forEach(b => b.classList.toggle('on', !!painter)); }
+function applyPainter() {
+  if (!painter) return; const f = painter.f; painter = null; paintBtns();
+  restoreSel(); document.execCommand('removeFormat'); document.execCommand('styleWithCSS', false, true);
+  if (f.bold) document.execCommand('bold'); if (f.italic) document.execCommand('italic');
+  if (f.underline) document.execCommand('underline'); if (f.strike) document.execCommand('strikeThrough');
+  document.execCommand('foreColor', false, f.color);
+  if (f.bg !== 'transparent') document.execCommand('hiliteColor', false, f.bg);
+  document.execCommand('fontName', false, f.family);
+  setSize(f.size); toast('Formato aplicado');
+}
+
+// --- barras de formato: fija (abajo) y flotante al seleccionar ---
+const fontMenu = () => menu(FONTS.map(([l, f]) => ({ t: l, fn: () => fmt('fontName', f) })));
+const sizeMenu = () => menu(SIZES.map(s => ({ t: s + ' px', fn: () => setSize(s) })));
+const BTN = {
+  bold: { l: 'N', fn: () => fmt('bold'), cmd: 'bold', st: 'font-weight:800' },
+  italic: { l: 'K', fn: () => fmt('italic'), cmd: 'italic', st: 'font-style:italic' },
+  underline: { l: 'S', fn: () => fmt('underline'), cmd: 'underline', st: 'text-decoration:underline' },
+  strike: { l: 'T', fn: () => fmt('strikeThrough'), cmd: 'strikeThrough', st: 'text-decoration:line-through' },
+  font: { l: 'Fuente', role: 'font', fn: fontMenu }, size: { l: '16', role: 'size', fn: sizeMenu },
+  grow: { l: 'A<small>▲</small>', fn: () => stepSize(1) }, shrink: { l: 'A<small>▼</small>', fn: () => stepSize(-1) },
+  color: { l: 'A<span class="sw" style="background:#e53935"></span>', fn: () => colorPick('Color del texto', 'foreColor') },
+  hilite: { l: '▮<span class="sw" style="background:#fdd835"></span>', fn: () => colorPick('Resaltado', 'hiliteColor', true) },
+  ul: { l: '• Lista', fn: () => fmt('insertUnorderedList'), cmd: 'insertUnorderedList' },
+  ol: { l: '1. Lista', fn: () => fmt('insertOrderedList'), cmd: 'insertOrderedList' },
+  align: { l: 'Alinear', fn: () => menu([{ t: 'Izquierda', fn: () => fmt('justifyLeft') }, { t: 'Centro', fn: () => fmt('justifyCenter') }, { t: 'Derecha', fn: () => fmt('justifyRight') }, { t: 'Justificado', fn: () => fmt('justifyFull') }]) },
+  head: { l: 'Título', fn: () => menu([{ t: 'Texto normal', fn: () => fmt('formatBlock', 'div') }, { t: 'Título grande', fn: () => fmt('formatBlock', 'h1', false) }, { t: 'Título mediano', fn: () => fmt('formatBlock', 'h2', false) }]) },
+  link: { l: ic('link'), fn: () => { const a = savedRange && (savedRange.startContainer.nodeType === 3 ? savedRange.startContainer.parentElement : savedRange.startContainer).closest('a'); linkDialog(a && $('edText').contains(a) ? a : null); } },
+  painter: { l: ic('brush'), role: 'painter', fn: togglePainter },
+  sup: { l: 'x²', fn: () => fmt('superscript'), cmd: 'superscript' }, sub: { l: 'x₂', fn: () => fmt('subscript'), cmd: 'subscript' },
+  clear: { l: '✕ Formato', fn: () => fmt('removeFormat') },
+};
+function fillBar(box, keys) {
+  for (const k of keys) {
+    const d = BTN[k], b = el('button', { innerHTML: d.l, onclick: d.fn, title: k });
+    if (d.cmd) b.dataset.cmd = d.cmd; if (d.role) b.dataset.role = d.role; if (d.st) b.style.cssText = d.st;
+    b.addEventListener('pointerdown', e => e.preventDefault());   // no quitar el foco ni la selección al editor
+    box.append(b);
+  }
 }
 function buildFmtBar() {
   const bar = $('fmtBar'); bar.replaceChildren();
-  const btn = (label, fn, cmd, style) => {
-    const b = el('button', { innerHTML: label, onclick: fn }); if (cmd) b.dataset.cmd = cmd; if (style) b.style.cssText = style;
-    b.addEventListener('pointerdown', e => e.preventDefault()); bar.append(b);   // no quitar el foco al editor
-  };
-  btn('N', () => fmt('bold'), 'bold', 'font-weight:700'); btn('K', () => fmt('italic'), 'italic', 'font-style:italic');
-  btn('S', () => fmt('underline'), 'underline', 'text-decoration:underline'); btn('T', () => fmt('strikeThrough'), 'strikeThrough', 'text-decoration:line-through');
-  btn('Fuente', () => menu(FONTS.map(([l, f]) => ({ t: l, fn: () => fmt('fontName', f) }))));
-  btn('Tamaño', () => menu(SIZES.map(s => ({ t: s + ' px', fn: () => setSize(s) }))));
-  btn('A<span class="sw" style="background:#e53935"></span>', () => colorPick('Color del texto', 'foreColor'));
-  btn('▮<span class="sw" style="background:#fdd835"></span>', () => colorPick('Resaltado', 'hiliteColor', true));
-  btn('• Lista', () => fmt('insertUnorderedList'), 'insertUnorderedList'); btn('1. Lista', () => fmt('insertOrderedList'), 'insertOrderedList');
-  btn('Alinear', () => menu([{ t: 'Izquierda', fn: () => fmt('justifyLeft') }, { t: 'Centro', fn: () => fmt('justifyCenter') }, { t: 'Derecha', fn: () => fmt('justifyRight') }, { t: 'Justificado', fn: () => fmt('justifyFull') }]));
-  btn('Título', () => menu([{ t: 'Texto normal', fn: () => fmt('formatBlock', 'div') }, { t: 'Título grande', fn: () => fmt('formatBlock', 'h1', false) }, { t: 'Título mediano', fn: () => fmt('formatBlock', 'h2', false) }]));
-  btn('Sup', () => fmt('superscript'), 'superscript'); btn('Sub', () => fmt('subscript'), 'subscript');
-  btn('✕ Formato', () => fmt('removeFormat'));
+  fillBar(bar, ['bold', 'italic', 'underline', 'strike', 'font', 'size', 'grow', 'shrink', 'color', 'hilite', 'ul', 'ol', 'align', 'head', 'link', 'painter', 'sup', 'sub', 'clear']);
+  const mini = $('miniBar'); mini.replaceChildren();
+  const r1 = el('div', { className: 'r' }), r2 = el('div', { className: 'r' });
+  fillBar(r1, ['font', 'size', 'grow', 'shrink', 'clear', 'painter']); fillBar(r2, ['bold', 'italic', 'underline', 'hilite', 'color', 'ul', 'ol', 'link']);
+  mini.append(r1, r2);
+}
+function updateMini() {
+  const m = $('miniBar'), ed = $('edText'), sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed || ed.hidden || !ed.contains(sel.anchorNode) || !ed.isContentEditable || !$('overlay').hidden) { m.hidden = true; return; }
+  const rc = sel.getRangeAt(0).getBoundingClientRect(); if (!rc.width && !rc.height) { m.hidden = true; return; }
+  m.hidden = false;
+  const w = m.offsetWidth, h = m.offsetHeight;
+  let top = rc.bottom + 44;                                  // debajo de la selección (arriba está el menú nativo de Android)
+  if (top + h > innerHeight - 70) top = Math.max(60, rc.top - h - 52);
+  m.style.left = Math.max(4, Math.min(innerWidth - w - 4, rc.left + rc.width / 2 - w / 2)) + 'px'; m.style.top = top + 'px';
 }
 
 /* ============ Menú y acciones del editor ============ */
@@ -820,7 +964,9 @@ function renderSettings() {
   item('Importar archivos de texto (.txt)', 'Uno o varios; cada archivo crea una nota', () => pickFile('.txt,text/plain', true, importTxt));
   item('Vaciar papelera', '', emptyTrash);
   sec('Sincronización');
-  item('Sincronizar entre dispositivos', 'Próximamente', () => info('Sincronización', 'Aún no está disponible. Mientras tanto usa exportar/importar copia de seguridad.'));
+  item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
+  item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
+  item('Cerrar sesión de Google', '', googleSignOut);
   sec('Acerca de');
   item('Notas', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
 }
@@ -870,10 +1016,117 @@ async function checkReminders() {
   }
 }
 
+/* ============ Sincronización con Google Drive ============ */
+// Guarda un único archivo JSON en la carpeta privada de la app (appDataFolder) de tu Drive.
+// Alcance mínimo: drive.appdata (la app no ve ningún otro archivo de tu Drive).
+const DRIVE_FILE = 'notas-sync.json';
+const tombs = () => { try { return JSON.parse(pref('tomb') || '{}'); } catch (e) { return {}; } };
+const saveTombs = t => pref('tomb', JSON.stringify(t));
+async function forgetNote(id) { const t = tombs(); t['n:' + id] = Date.now(); saveTombs(t); await DB.del('notes', id); }
+async function forgetFolder(id) { const t = tombs(); t['f:' + id] = Date.now(); saveTombs(t); await DB.del('folders', id); }
+
+// Fusión pura (sin red): gana la versión más reciente de cada nota; los borrados se propagan con "lápidas".
+function mergeData(L, R) {
+  const tomb = Object.assign({}, R.tomb);
+  for (const k in L.tomb) tomb[k] = Math.max(tomb[k] || 0, L.tomb[k]);
+  const lim = Date.now() - 90 * 864e5; for (const k in tomb) if (tomb[k] < lim) delete tomb[k];
+  const map = new Map();
+  for (const n of R.notes) map.set(n.id, { r: n });
+  for (const n of L.notes) map.set(n.id, Object.assign(map.get(n.id) || {}, { l: n }));
+  const notes = [], applyLocal = [], delLocal = []; let upload = false;
+  for (const [id, { l, r }] of map) {
+    const best = !r ? l : !l ? r : (r.updated > l.updated ? r : l);
+    const t = tomb['n:' + id];
+    if (t && t >= best.updated) { if (l) delLocal.push(id); if (r) upload = true; continue; }
+    notes.push(best); if (best !== l) applyLocal.push(best); if (best !== r) upload = true;
+  }
+  const fmap = new Map();
+  for (const f of R.folders) fmap.set(f.id, { r: f });
+  for (const f of L.folders) fmap.set(f.id, Object.assign(fmap.get(f.id) || {}, { l: f }));
+  const folders = [], applyFolders = [], delFolders = [];
+  for (const [id, { l, r }] of fmap) {
+    if (tomb['f:' + id] && id !== 'main') { if (l) delFolders.push(id); if (r) upload = true; continue; }
+    const best = l || r; folders.push(best); if (!l) applyFolders.push(best); if (!r) upload = true;
+  }
+  for (const k in tomb) if (tomb[k] !== (R.tomb || {})[k]) upload = true;
+  return { notes, folders, tomb, applyLocal, delLocal, applyFolders, delFolders, upload };
+}
+
+let gToken = null, gExp = 0;
+const loadGIS = () => (window.google && google.accounts) ? Promise.resolve() : new Promise((res, rej) => {
+  const s = el('script', { src: 'https://accounts.google.com/gsi/client', onload: res, onerror: () => rej(new Error('Sin conexión a internet')) }); document.head.append(s);
+});
+async function getToken() {
+  if (gToken && Date.now() < gExp - 60000) return gToken;
+  const cid = pref('gclient'); if (!cid) throw new Error('noclient');
+  await loadGIS();
+  return new Promise((res, rej) => {
+    const tc = google.accounts.oauth2.initTokenClient({
+      client_id: cid, scope: 'https://www.googleapis.com/auth/drive.appdata',
+      callback: r => { if (r.error) rej(new Error(r.error_description || r.error)); else { gToken = r.access_token; gExp = Date.now() + r.expires_in * 1000; res(gToken); } },
+      error_callback: e => rej(new Error(e.type === 'popup_closed' ? 'Cancelaste el inicio de sesión' : (e.message || e.type))),
+    });
+    tc.requestAccessToken({ prompt: gToken === null && !pref('gconsent') ? 'consent' : '' });
+  });
+}
+async function gfetch(url, opts = {}) {
+  const r = await fetch(url, Object.assign({}, opts, { headers: Object.assign({ Authorization: 'Bearer ' + gToken }, opts.headers || {}) }));
+  if (r.status === 401) { gToken = null; throw new Error('Sesión de Google caducada, vuelve a sincronizar'); }
+  if (!r.ok) throw new Error('Drive respondió ' + r.status);
+  return r;
+}
+const strip = n => { const o = {}; for (const k in n) if (k[0] !== '_') o[k] = n[k]; return o; };
+
+let syncing = false;
+async function syncDrive() {
+  if (syncing) return; if (S.cur) return;
+  if (!pref('gclient')) { await setClientId(true); if (!pref('gclient')) return; }
+  if (!navigator.onLine) { toast('Sin conexión a internet'); return; }
+  syncing = true; $('syncBtn').classList.add('spin'); toast('Sincronizando…');
+  try {
+    await getToken(); pref('gconsent', '1');
+    const q = encodeURIComponent(`name='${DRIVE_FILE}'`);
+    const list = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id)`)).json();
+    const fid = list.files && list.files[0] && list.files[0].id;
+    let R = { notes: [], folders: [], tomb: {} };
+    if (fid) { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json(); R = { notes: d.notes || [], folders: d.folders || [], tomb: d.tomb || {} }; }
+    const L = { notes: S.notes.map(strip), folders: S.folders, tomb: tombs() };
+    const m = mergeData(L, R);
+    for (const n of m.applyLocal) { const i = S.notes.findIndex(x => x.id === n.id); const full = Object.assign(newNote(n.type || 'text'), n); i >= 0 ? S.notes[i] = full : S.notes.push(full); await DB.put('notes', full); }
+    for (const id of m.delLocal) { S.notes = S.notes.filter(x => x.id !== id); await DB.del('notes', id); }
+    for (const f of m.applyFolders) { S.folders.push(f); await DB.put('folders', f); }
+    for (const id of m.delFolders) { S.folders = S.folders.filter(x => x.id !== id); await DB.del('folders', id); }
+    saveTombs(m.tomb);
+    if (m.upload || !fid) {
+      const body = JSON.stringify({ app: 'notas', version: 2, saved: Date.now(), notes: m.notes.map(strip), folders: m.folders, tomb: m.tomb });
+      if (fid) await gfetch(`https://www.googleapis.com/upload/drive/v3/files/${fid}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+      else {
+        const bd = 'nb' + Date.now();
+        const mp = `--${bd}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name: DRIVE_FILE, parents: ['appDataFolder'] })}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${bd}--`;
+        await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + bd }, body: mp });
+      }
+    }
+    pref('lastSync', String(Date.now()));
+    toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`); renderMain();
+  } catch (e) {
+    toast(e.message === 'noclient' ? 'Falta el ID de cliente de Google' : 'No se pudo sincronizar: ' + e.message);
+  } finally { syncing = false; $('syncBtn').classList.remove('spin'); }
+}
+async function setClientId(first) {
+  const v = await ask(first ? 'Para sincronizar pega tu ID de cliente de Google (termina en .apps.googleusercontent.com)' : 'ID de cliente de Google', pref('gclient') || '');
+  if (v === null) return;
+  pref('gclient', v.trim()); gToken = null; pref('gconsent', '');
+  if (first && v.trim()) syncDrive();
+}
+function googleSignOut() {
+  if (gToken && window.google && google.accounts) google.accounts.oauth2.revoke(gToken, () => {});
+  gToken = null; pref('gconsent', ''); toast('Sesión de Google cerrada');
+}
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
-  $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu;
+  $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu; $('syncBtn').onclick = syncDrive;
   $('folderBtn').onclick = () => pickFolder();
   $('searchBtn').onclick = () => { const b = $('searchBar'); b.hidden = !b.hidden; if (b.hidden) { S.q = ''; $('searchInput').value = ''; renderMain(); } else $('searchInput').focus(); };
   $('searchInput').oninput = e => { S.q = e.target.value; renderMain(); };
@@ -886,19 +1139,22 @@ function wire() {
   $('edMore').onclick = editorMenu; $('edShare').onclick = shareNote;
   $('edDel').onclick = async () => {
     const n = S.cur;
-    if (n.deleted) { if (!(await confirmD('¿Eliminar definitivamente esta nota?'))) return; S.notes = S.notes.filter(x => x !== n); await DB.del('notes', n.id); closeScreen(); return; }
+    if (n.deleted) { if (!(await confirmD('¿Eliminar definitivamente esta nota?'))) return; S.notes = S.notes.filter(x => x !== n); await forgetNote(n.id); closeScreen(); return; }
     if (isEmpty(n)) { closeScreen(); return; }
     n.deleted = Date.now(); await persist(n); closeScreen();
     toast('Nota movida a la papelera', 'Deshacer', async () => { n.deleted = null; await persist(n); renderMain(); });
   };
   $('edText').oninput = onRichInput;
   $('edText').addEventListener('paste', onRichPaste);
+  $('edText').addEventListener('click', e => { const a = e.target.closest && e.target.closest('a'); if (a && $('edText').contains(a)) { e.preventDefault(); linkMenu(a); } });
+  $('edBody').addEventListener('scroll', () => requestAnimationFrame(updateMini));
   document.addEventListener('selectionchange', onSelChange);
   buildFmtBar();
   const caretLink = () => {
     const t = $('edText'), b = $('linkBtn'), sel = getSelection();
     if (t.hidden || !sel.rangeCount || sel.anchorNode.nodeType !== 3 || !t.contains(sel.anchorNode)) { b.hidden = true; return; }
-    const p = sel.anchorOffset, l = findLinks(sel.anchorNode.data).find(l => p >= l.s && p <= l.e);
+    if (sel.anchorNode.parentElement.closest('a')) { b.hidden = true; return; }
+    const p = sel.anchorOffset, l = findLinks(sel.anchorNode.data).find(l => l.k === 'wiki' && p >= l.s && p <= l.e);
     if (l) { b.textContent = 'Abrir enlace: ' + l.v; b.onclick = () => openLink(l); b.hidden = false; } else b.hidden = true;
   };
   for (const ev of ['click', 'keyup']) $('edText').addEventListener(ev, caretLink);
@@ -930,7 +1186,7 @@ async function init() {
     S.notes = await DB.all('notes'); S.folders = await DB.all('folders');
     if (!S.folders.some(f => f.id === 'main')) { const m = { id: 'main', name: 'Carpeta principal', parent: null }; S.folders.push(m); await DB.put('folders', m); }
     const lim = Date.now() - TRASH_DAYS * 864e5;
-    for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await DB.del('notes', n.id);
+    for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await forgetNote(n.id);
     S.notes = S.notes.filter(n => !n.deleted || n.deleted >= lim);
   } catch (e) { toast('Error al abrir el almacenamiento: ' + e.message); }
   renderMain();
