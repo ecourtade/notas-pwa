@@ -120,3 +120,11 @@ small{font-size:.6em}
 .tabs{align-items:center}
 .tabs button.ib{flex:none;width:40px;height:40px;padding:0;border:0;background:none;color:var(--acc)}
 .ib.sm{width:34px;height:34px;color:#fff;display:inline-grid;vertical-align:middle}
+
+#lockScreen{position:fixed;inset:0;z-index:300;background:var(--bg);display:grid;place-items:center}
+.lockbox{width:min(86vw,320px);text-align:center}
+.lockbox h2{margin:0 0 6px}.lockbox p{color:var(--sub);margin:0 0 18px}
+#lockPin{font-size:1.6rem;text-align:center;letter-spacing:.4em;border-bottom:2px solid var(--acc);padding:8px 0}
+#lockMsg{min-height:1.6em;margin:10px 0;color:#ff6b6b;font-size:.9rem}
+.lockbox button{display:block;width:100%;margin-top:10px;padding:12px;border-radius:8px;background:var(--tab);color:#fff;font-weight:600}
+#lockBio{background:none;border:1px solid var(--acc);color:var(--acc)}

@@ -121,25 +121,27 @@ const b64 = u => { let s = ''; new Uint8Array(u).forEach(b => s += String.fromCh
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 async function deriveKey(pw, salt) {
   const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, km, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, km, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
 }
 async function encPayload(n) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, n._key, new TextEncoder().encode(JSON.stringify({ body: n.body, html: n.html, items: n.items })));
   return { s: n.enc.s, iv: b64(iv), d: b64(ct) };
 }
+async function decryptWith(n, key) {
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(n.enc.iv) }, key, unb64(n.enc.d));
+  const o = JSON.parse(new TextDecoder().decode(pt));
+  n.body = o.body; n.html = o.html || ''; n.items = o.items; n._key = key;
+}
 async function unlock(n) {
   if (!n.enc || n._key) return true;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS'); return false; }
+  if (await bioUnlock(n)) return true;                      // huella, si está activada para esta nota
   for (;;) {
     const pw = await ask('Contraseña de la nota', '', 'password');
     if (pw === null) return false;
-    try {
-      const key = await deriveKey(pw, unb64(n.enc.s));
-      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(n.enc.iv) }, key, unb64(n.enc.d));
-      const o = JSON.parse(new TextDecoder().decode(pt));
-      n.body = o.body; n.html = o.html || ''; n.items = o.items; n._key = key; return true;
-    } catch (e) { toast('Contraseña incorrecta'); }
+    try { await decryptWith(n, await deriveKey(pw, unb64(n.enc.s))); setTimeout(() => offerBio(n), 500); return true; }
+    catch (e) { toast('Contraseña incorrecta'); }
   }
 }
 
@@ -173,7 +175,7 @@ function newNote(type, folder) {
 async function persist(n) {
   const rec = {}; for (const k in n) if (k[0] !== '_') rec[k] = n[k];
   if (n.enc) {
-    if (n._key) rec.enc = await encPayload(n);
+    if (n._key) { rec.enc = await encPayload(n); n.enc = rec.enc; }   // la copia en memoria también debe tener el último texto cifrado
     rec.title = n.type === 'text' ? 'Nota cifrada' : n.title; rec.body = ''; rec.html = ''; rec.items = [];
   }
   if (!S.notes.includes(n)) S.notes.push(n);
@@ -892,6 +894,7 @@ function editorMenu() {
     { t: n.readonly ? 'Desactivar solo lectura' : 'Solo lectura', fn: () => { n.readonly = !n.readonly; touch(); drawEditor(); } },
     { t: n.reminder ? 'Recordatorio: ' + fmtDate(n.reminder) + ' (cambiar)' : 'Añadir recordatorio', fn: reminderDialog },
     { t: n.enc ? 'Quitar cifrado' : 'Cifrar con contraseña', fn: toggleEncrypt },
+    n.enc ? { t: S.bioNotes.has(n.id) ? 'Quitar la huella de esta nota' : 'Abrir esta nota con huella', fn: () => toggleNoteBio(n) } : null,
     '-', { t: 'Mover a carpeta…', fn: async () => { const f = await pickFolder(true); if (f) { n.folder = f; touch(); toast('Movida a ' + folderName(f)); } } },
     { t: 'Duplicar', fn: async () => { const c = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(n).filter(([k]) => k[0] !== '_')))); c.id = uid(); c.created = c.updated = Date.now(); c.enc = n.enc ? null : null; await persist(c); toast('Nota duplicada'); } },
     t !== 'draw' ? { t: 'Exportar como .txt', fn: () => exportTxt(n) } : { t: 'Exportar como imagen', fn: exportDraw },
@@ -936,11 +939,11 @@ async function reminderDialog() {
 async function toggleEncrypt() {
   const n = S.cur;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS (o localhost)'); return; }
-  if (n.enc) { if (!(await confirmD('¿Quitar el cifrado de esta nota?'))) return; n.enc = null; delete n._key; touch(); toast('Cifrado quitado'); drawEditor(); return; }
+  if (n.enc) { if (!(await confirmD('¿Quitar el cifrado de esta nota?'))) return; n.enc = null; delete n._key; bioForget(n.id); touch(); toast('Cifrado quitado'); drawEditor(); return; }
   const p1 = await ask('Nueva contraseña', '', 'password'); if (!p1) return;
   const p2 = await ask('Repite la contraseña', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return; }
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  n.enc = { s: b64(salt), iv: '', d: '' }; n._key = await deriveKey(p1, salt);
+  bioForget(n.id); n.enc = { s: b64(salt), iv: '', d: '' }; n._key = await deriveKey(p1, salt);
   touch(); toast('Nota cifrada. No hay forma de recuperar la contraseña.'); drawEditor();
 }
 function noteText(n) {
@@ -978,6 +981,9 @@ function renderSettings() {
   sec('Apariencia');
   item('Tema', settings.theme === 'dark' ? 'Oscuro' : 'Claro', () => { settings.theme = settings.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = settings.theme; renderSettings(); });
   item('Enlaces wiki (PalabrasWiki y [[Nota]])', settings.wiki ? 'Activados' : 'Desactivados', () => { settings.wiki = !settings.wiki; renderSettings(); });
+  sec('Seguridad');
+  item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
+  item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
   sec('Copias de seguridad automáticas');
   item('Copia automática', bk.on ? 'Activada' : 'Desactivada', () => { pref('bk_on', bk.on ? '0' : '1'); renderSettings(); });
   item('Frecuencia', bk.days === 1 ? 'Cada día' : `Cada ${bk.days} días`, () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref('bk_days', String(d)); renderSettings(); } }))));
@@ -1305,6 +1311,139 @@ async function backupsMenu() {
   ]) })));
 }
 
+/* ============ Huella (WebAuthn) y bloqueo de la app ============ */
+// La huella la verifica el sistema (Android/Windows Hello); la app nunca ve datos biométricos.
+// - PRF disponible: la clave de cada nota se guarda envuelta con un secreto que solo libera la huella (seguro).
+// - Sin PRF: la huella solo "abre la puerta" (cómodo, pero menos seguro); se avisa y hay que aceptarlo.
+const PRF_SALT = new TextEncoder().encode('notas-enplus-prf-v1');
+const metaAll = () => DB.all('meta').catch(() => []);
+const bio = {
+  get cred() { return pref('bio_cred'); },
+  async available() { try { return !!(window.PublicKeyCredential && navigator.credentials && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; } },
+  async register() {
+    const c = await navigator.credentials.create({ publicKey: {
+      rp: { name: 'Notas_EnPlus' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'notas', displayName: 'Notas_EnPlus' },
+      challenge: crypto.getRandomValues(new Uint8Array(32)), pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000, extensions: { prf: {} },
+    } });
+    pref('bio_cred', b64(c.rawId));
+  },
+  async assert(prf) {
+    const publicKey = { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: unb64(this.cred) }], userVerification: 'required', timeout: 60000 };
+    if (prf) publicKey.extensions = { prf: { eval: { first: PRF_SALT } } };
+    const a = await navigator.credentials.get({ publicKey });
+    const r = a.getClientExtensionResults(), first = r.prf && r.prf.results && r.prf.results.first;
+    return { prf: first ? new Uint8Array(first) : null };
+  },
+};
+async function prfWrapKey(prfBytes) {
+  const base = await crypto.subtle.importKey('raw', prfBytes, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('notas-bio-wrap') }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function bioForget(noteId) { S.bioNotes.delete(noteId); try { await DB.del('meta', 'bio:' + noteId); } catch (e) {} }
+async function bioActivate(n) {
+  if (!n._key) return false;
+  if (!(await bio.available())) { toast('Este dispositivo o navegador no ofrece huella al abrir páginas web'); return false; }
+  try {
+    if (!bio.cred) await bio.register();
+    const a = await bio.assert(true);
+    const raw = await crypto.subtle.exportKey('raw', n._key), rec = { id: 'bio:' + n.id, salt: n.enc.s };
+    if (a.prf) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      rec.mode = 'prf'; rec.iv = b64(iv); rec.d = b64(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await prfWrapKey(a.prf), raw));
+    } else {
+      const ok = await dialog('Huella sin cifrado reforzado', el('p', { textContent: 'Tu dispositivo permite usar la huella, pero no ofrece la función para proteger la clave con ella. Puedo guardar la clave de esta nota en el dispositivo y liberarla solo cuando la huella coincida. Es cómodo, pero menos seguro que la contraseña: alguien con acceso a los datos del navegador podría saltarse la huella.\n\n¿Activarlo de todos modos?' }), [{ t: 'No', v: false }, { t: 'Activar', v: true }]);
+      if (!ok) return false;
+      rec.mode = 'gate'; rec.raw = b64(raw);
+    }
+    await DB.put('meta', rec); S.bioNotes.add(n.id); return true;
+  } catch (e) { if (e.name !== 'NotAllowedError') toast('No se pudo activar la huella: ' + (e.message || e.name)); return false; }
+}
+async function bioUnlock(n) {
+  if (!bio.cred || !S.bioNotes.has(n.id)) return false;
+  const meta = (await metaAll()).find(m => m.id === 'bio:' + n.id); if (!meta) return false;
+  try {
+    const a = await bio.assert(meta.mode === 'prf'); let raw;
+    if (meta.mode === 'prf') { if (!a.prf) throw new Error('prf'); raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(meta.iv) }, await prfWrapKey(a.prf), unb64(meta.d)); }
+    else raw = unb64(meta.raw);
+    await decryptWith(n, await crypto.subtle.importKey('raw', raw, 'AES-GCM', true, ['encrypt', 'decrypt']));
+    return true;
+  } catch (e) {
+    if (e.name === 'NotAllowedError') return false;               // cancelada: se pide la contraseña
+    await bioForget(n.id); toast('La huella ya no sirve para esta nota; usa la contraseña'); return false;
+  }
+}
+async function toggleNoteBio(n) {
+  if (S.bioNotes.has(n.id)) { await bioForget(n.id); toast('Huella quitada de esta nota'); return; }
+  if (await bioActivate(n)) toast('Esta nota se abrirá con huella');
+}
+async function offerBio(n) {
+  if (pref('bio_offer') === '0' || S.bioNotes.has(n.id) || !n._key || !(await bio.available())) return;
+  const r = await dialog('¿Abrir con huella?', el('p', { textContent: 'La próxima vez puedes abrir esta nota con tu huella en lugar de la contraseña.' }), [{ t: 'No preguntar más', v: 'never' }, { t: 'Ahora no', v: null }, { t: 'Activar', v: 'ok' }]);
+  if (r === 'never') pref('bio_offer', '0'); else if (r === 'ok' && await bioActivate(n)) toast('Esta nota se abrirá con huella');
+}
+
+/* --- bloqueo de toda la app (PIN y/o huella) --- */
+const lock = {
+  get on() { return !!pref('lock_pin'); }, get bio() { return pref('lock_bio') === '1' && !!bio.cred; },
+  get delay() { const v = pref('lock_delay'); return v === null ? 1 : +v; }, shown: false, hiddenAt: 0,
+};
+async function hashPin(pin, salt) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  return b64(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' }, km, 256));
+}
+async function checkPin(pin) { const o = JSON.parse(pref('lock_pin')); return (await hashPin(pin, unb64(o.s))) === o.h; }
+async function setPin() {
+  if (!crypto.subtle) { toast('El bloqueo requiere HTTPS'); return false; }
+  if (!lock.on) await info('Antes de empezar', 'Si olvidas el PIN, la única salida es borrar los datos del sitio, y eso borra las notas guardadas en este dispositivo. Mantén activadas la sincronización con Drive o las copias de seguridad.');
+  const p1 = await ask('Nuevo PIN (de 4 a 8 dígitos)', '', 'password'); if (p1 === null) return false;
+  if (!/^\d{4,8}$/.test(p1)) { toast('El PIN debe tener de 4 a 8 dígitos'); return false; }
+  const p2 = await ask('Repite el PIN', '', 'password'); if (p1 !== p2) { toast('Los PIN no coinciden'); return false; }
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  pref('lock_pin', JSON.stringify({ s: b64(salt), h: await hashPin(p1, salt) })); toast('PIN guardado'); return true;
+}
+async function verifyCurrentPin() {
+  const p = await ask('PIN actual', '', 'password'); if (p === null) return false;
+  if (await checkPin(p)) return true; toast('PIN incorrecto'); return false;
+}
+function showLock() {
+  if (!lock.on || lock.shown) return; lock.shown = true;
+  $('lockScreen').hidden = false; $('lockPin').value = ''; $('lockMsg').textContent = ''; $('lockBio').hidden = !lock.bio;
+  setTimeout(() => { $('lockPin').focus(); if (lock.bio) lockWithBio(true); }, 150);
+}
+function unlockApp() { lock.shown = false; $('lockScreen').hidden = true; pref('lock_fails', '0'); pref('lock_until', '0'); }
+async function lockWithBio(auto) {
+  try { await bio.assert(false); unlockApp(); } catch (e) { if (!auto) $('lockMsg').textContent = 'No se pudo verificar la huella'; }
+}
+async function lockSubmit() {
+  const wait = (+pref('lock_until') || 0) - Date.now();
+  if (wait > 0) { $('lockMsg').textContent = `Demasiados intentos. Espera ${Math.ceil(wait / 1000)} s`; return; }
+  if (await checkPin($('lockPin').value)) { unlockApp(); return; }
+  const fails = (+pref('lock_fails') || 0) + 1; pref('lock_fails', String(fails)); $('lockPin').value = '';
+  if (fails >= 5) { pref('lock_until', String(Date.now() + 30000 * Math.pow(2, Math.min(6, fails - 5)))); $('lockMsg').textContent = 'Demasiados intentos. Espera un momento.'; }
+  else $('lockMsg').textContent = `PIN incorrecto (${fails}/5)`;
+}
+async function toggleLockBio() {
+  if (lock.bio) { pref('lock_bio', '0'); return; }
+  if (!(await bio.available())) { toast('Este dispositivo o navegador no ofrece huella al abrir páginas web'); return; }
+  try { if (!bio.cred) await bio.register(); await bio.assert(false); pref('lock_bio', '1'); toast('Huella activada para desbloquear la app'); }
+  catch (e) { if (e.name !== 'NotAllowedError') toast('No se pudo activar la huella'); }
+}
+const DELAYS = [[0, 'Inmediatamente'], [1, 'Tras 1 minuto'], [5, 'Tras 5 minutos'], [15, 'Tras 15 minutos']];
+function lockMenu() {
+  menu([
+    { t: lock.on ? 'Cambiar PIN' : 'Activar con un PIN', fn: async () => { if (lock.on && !(await verifyCurrentPin())) return; if (await setPin()) renderSettings(); } },
+    lock.on ? { t: lock.bio ? 'Dejar de usar la huella' : 'Usar también la huella', fn: async () => { await toggleLockBio(); renderSettings(); } } : null,
+    lock.on ? { t: 'Bloquear: ' + (DELAYS.find(d => d[0] === lock.delay) || DELAYS[1])[1], fn: () => menu(DELAYS.map(([m, l]) => ({ t: l, fn: () => { pref('lock_delay', String(m)); renderSettings(); } }))) } : null,
+    lock.on ? { t: 'Desactivar el bloqueo', fn: async () => { if (!(await verifyCurrentPin())) return; for (const k of ['lock_pin', 'lock_bio', 'lock_fails', 'lock_until']) pref(k, ''); renderSettings(); toast('Bloqueo desactivado'); } } : null,
+  ]);
+}
+async function removeBio() {
+  if (!(await confirmD('¿Quitar la huella registrada en este dispositivo? Las notas cifradas volverán a pedir la contraseña.'))) return;
+  for (const id of [...S.bioNotes]) await bioForget(id);
+  for (const k of ['bio_cred', 'bio_prf', 'lock_bio']) pref(k, ''); renderSettings(); toast('Huella quitada');
+}
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
@@ -1317,6 +1456,8 @@ function wire() {
   $('selDel').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id)); endSel(); await trashNotes(ns); renderMain(); };
   $('selMove').onclick = async () => { const f = await pickFolder(true); if (!f) return; for (const n of S.notes.filter(n => S.sel.has(n.id))) { n.folder = f; await persist(n); } endSel(); toast('Notas movidas a ' + folderName(f)); };
 
+  $('lockGo').onclick = lockSubmit; $('lockBio').onclick = () => lockWithBio(false);
+  $('lockPin').onkeydown = e => { if (e.key === 'Enter') lockSubmit(); };
   $('edBack').onclick = closeScreen; $('fdBack').onclick = closeScreen; $('stBack').onclick = closeScreen;
   $('edMore').onclick = editorMenu; $('edShare').onclick = shareNote;
   $('edDel').onclick = async () => {
@@ -1358,17 +1499,20 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) flush().catch(() => {}); else { checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
   addEventListener('pagehide', () => flush().catch(() => {}));
 }
 
 async function init() {
+  S.bioNotes = new Set();
   wire();
+  if (lock.on) showLock();                       // pantalla de bloqueo antes de cargar nada
   document.documentElement.dataset.theme = settings.theme;
   history.replaceState({ s: 'main' }, ''); history.pushState({ s: 'main' }, '');   // evita salir de la app con el primer "atrás"
   try {
     await DB.open();
     S.notes = await DB.all('notes'); S.folders = await DB.all('folders');
+    S.bioNotes = new Set((await metaAll()).filter(m => m.id.startsWith('bio:')).map(m => m.id.slice(4)));
     if (!S.folders.some(f => f.id === 'main')) { const m = { id: 'main', name: 'Carpeta principal', parent: null }; S.folders.push(m); await DB.put('folders', m); }
     const lim = Date.now() - TRASH_DAYS * 864e5;
     for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await forgetNote(n.id);
