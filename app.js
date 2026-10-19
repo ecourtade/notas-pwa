@@ -98,10 +98,12 @@ const DB = {
         const r = indexedDB.open('notas', 3);
         r.onupgradeneeded = () => { for (const s of ['notes', 'folders', 'backups', 'meta']) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
         r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+        r.onblocked = () => toast('Cierra las demás ventanas de la app para terminar de actualizar. Tus notas no se han borrado.');
       }), sleep(4000).then(() => { throw new Error('timeout'); })]);
     } catch (e) {            // sin IndexedDB (p. ej. file://): se usa localStorage
       this.idb = null; try { this.mem = JSON.parse(pref('notas_fb') || 'null') || this.mem; } catch (x) {}
-      toast('Modo limitado: el navegador no permite guardar datos de forma completa');
+      S.limited = true;
+      dialog('No se pudo abrir el almacenamiento', el('p', { textContent: 'Tus notas NO se han borrado: siguen guardadas en el navegador. Cierra todas las ventanas de la app (y pestañas del sitio), ábrela de nuevo y deberían aparecer. Mientras tanto no guardes nada nuevo.' }), [{ t: 'Entendido', v: 1 }]);
     }
   },
   tx(store, mode, fn) {
@@ -169,7 +171,7 @@ function noteTitle(n) {
   if (n.type === 'text') { const l = (n.enc && !n._key ? n.title : n.body).split('\n').find(s => s.trim()); return (l || n.title || 'Nota vacía').trim().slice(0, 80); }
   return n.title || TYPE_NAME[n.type];
 }
-const isEmpty = n => ({ text: !n.body.trim(), check: !n.items.some(i => i.t.trim()), voice: !n.media && !n.body.trim(), draw: !(n.strokes && n.strokes.length), photo: !n.media && !n.body.trim() }[n.type]);
+const isEmpty = n => ({ text: !n.body.trim(), check: !n.items.some(i => i.t.trim()), voice: !n.media && !n.body.trim(), draw: !(n.strokes && n.strokes.length) && !n.bg, photo: !n.media && !n.body.trim() }[n.type]);
 function newNote(type, folder) {
   const n = { id: uid(), type, title: '', body: '', items: [], folder: folder || 'main', color: '', readonly: false, enc: null, reminder: null, fired: false,
     media: null, strokes: [], html: '', deleted: null, created: Date.now(), updated: Date.now() };
@@ -178,6 +180,7 @@ function newNote(type, folder) {
   return n;
 }
 async function persist(n) {
+  if (n._new && !isEmpty(n)) delete n._new;
   const rec = {}; for (const k in n) if (k[0] !== '_') rec[k] = n[k];
   if (n.enc) {
     if (n._key) { rec.enc = await encPayload(n); n.enc = rec.enc; }   // la copia en memoria también debe tener el último texto cifrado
@@ -274,7 +277,7 @@ async function createNote(type, extra) {
   const f = S.view.kind === 'folder' ? S.view.id : 'main';
   const n = Object.assign(newNote(type, f), extra || {});
   if (type === 'check') n.items = [];
-  S.fresh = n;
+  n._new = true; S.fresh = n;
   await openNote(n, true);
 }
 function newMenu() {
@@ -424,7 +427,7 @@ function touch() {
 async function leaveEditor(keepStack) {
   const n = S.cur; if (!n) return;
   stopRec(true); stopAudio(); clearTimeout(S.timer);
-  if (!n.deleted && isEmpty(n) && !(n.enc)) {
+  if (!n.deleted && isEmpty(n) && !(n.enc) && n._new) {
     if (S.notes.includes(n)) { S.notes = S.notes.filter(x => x !== n); await forgetNote(n.id); }
   } else if (!n.deleted || S.notes.includes(n)) {
     if (S.notes.includes(n) || !isEmpty(n)) await persist(n);
@@ -1009,6 +1012,7 @@ function renderSettings() {
   item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
   item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
+  item('Registro de sincronización', 'Últimas operaciones (para diagnosticar problemas)', () => { let l = []; try { l = JSON.parse(pref('synclog') || '[]'); } catch (e) {} info('Registro de sincronización', l.length ? l.slice().reverse().map(e => fmtDate(e.t) + ' — ' + (e.blocked ? 'DETENIDO: pedía borrar ' + e.blocked : `↓${e.down} ↑${e.up} borradas:${e.del} total:${e.total}`)).join('\n') : 'Sin registros todavía'); });
   item('Cerrar sesión de Google', '', googleSignOut);
   sec('Acerca de');
   item('Notas', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
@@ -1129,6 +1133,7 @@ async function gfetch(url, opts = {}) {
 const strip = n => { const o = {}; for (const k in n) if (k[0] !== '_') o[k] = n[k]; return o; };
 
 let syncing = false;
+function syncLog(e) { try { const l = JSON.parse(pref('synclog') || '[]'); l.push(Object.assign({ t: Date.now() }, e)); pref('synclog', JSON.stringify(l.slice(-25))); } catch (x) {} }
 async function syncDrive(opts) {
   const auto = !!(opts && opts.auto);                 // arranque automático: sin avisos molestos
   if (syncing) return;
@@ -1147,6 +1152,13 @@ async function syncDrive(opts) {
     const pickRec = pickRecovery(S.recovery, R.recovery);          // la configuración de recuperación viaja con las notas
     if (pickRec !== S.recovery) await setRecovery(pickRec);
     if (pickRec && pickRec !== R.recovery) m.upload = true;
+    const mass = m.delLocal.length >= 10 && m.delLocal.length > S.notes.length * 0.1;
+    if (mass) {
+      syncLog({ blocked: m.delLocal.length });
+      if (auto) { toast(`La sincronización pedía borrar ${m.delLocal.length} notas y se detuvo. Toca ⟳ para revisarlo.`); return; }
+      await runBackup(true, true);
+      if (!(await confirmD(`Otro dispositivo pide borrar ${m.delLocal.length} notas de este. Se acaba de guardar una copia de seguridad. ¿Aplicar los borrados?`))) { toast('No se aplicaron los borrados'); return; }
+    } else if (m.delLocal.length + m.applyLocal.length >= 20) await runBackup(true, true);   // copia previa a cambios grandes
     const openId = S.cur && S.cur.id;                    // la nota abierta no se toca en esta ronda
     m.applyLocal = m.applyLocal.filter(n => n.id !== openId); m.delLocal = m.delLocal.filter(id => id !== openId);
     for (const n of m.applyLocal) { const i = S.notes.findIndex(x => x.id === n.id); const full = Object.assign(newNote(n.type || 'text'), n); i >= 0 ? S.notes[i] = full : S.notes.push(full); await DB.put('notes', full); }
@@ -1164,6 +1176,7 @@ async function syncDrive(opts) {
       }
     }
     pref('lastSync', String(Date.now()));
+    syncLog({ down: m.applyLocal.length, del: m.delLocal.length, up: m.upload ? m.notes.length : 0, total: S.notes.length });
     if (!auto || m.applyLocal.length || m.delLocal.length) toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`);
     renderMain();
   } catch (e) {
@@ -1267,8 +1280,8 @@ const backupJSON = () => JSON.stringify({ app: 'notas', version: 2, exported: Da
 async function gzip(text) { const st = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip')); return new Response(st).blob(); }
 async function gunzipText(blob) { const st = blob.stream().pipeThrough(new DecompressionStream('gzip')); return new Response(st).text(); }
 
-async function runBackup(force) {
-  if (!DB.idb) { if (force) toast('Este navegador no permite guardar copias internas'); return; }
+async function runBackup(force, silent) {
+  if (!DB.idb) { if (force && !silent) toast('Este navegador no permite guardar copias internas'); return; }
   const due = bk.on && Date.now() - (+pref('bk_last') || 0) >= bk.days * 864e5 - 36e5;
   if (!force && (!due || !S.notes.length)) return;
   const json = backupJSON(), ts = Date.now(), name = `notas-copia-${stamp(new Date(ts))}.json`;
@@ -1279,7 +1292,7 @@ async function runBackup(force) {
   const all = (await DB.all('backups')).sort((a, b) => b.ts - a.ts);
   for (const old of all.slice(bk.keep)) await DB.del('backups', old.id);
   await folderWrite(name, json, false);
-  if (force) toast('Copia de seguridad creada');
+  if (force && !silent) toast('Copia de seguridad creada');
 }
 // Carpeta del PC (Chrome/Edge de escritorio): requiere permiso del usuario, que se renueva con un toque.
 let folderPending = null;
