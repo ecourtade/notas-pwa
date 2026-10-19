@@ -176,7 +176,7 @@ async function persist(n) {
   const rec = {}; for (const k in n) if (k[0] !== '_') rec[k] = n[k];
   if (n.enc) {
     if (n._key) { rec.enc = await encPayload(n); n.enc = rec.enc; }   // la copia en memoria también debe tener el último texto cifrado
-    rec.title = n.type === 'text' ? 'Nota cifrada' : n.title; rec.body = ''; rec.html = ''; rec.items = [];
+    rec.title = n._key ? noteTitle(n) : n.title; rec.body = ''; rec.html = ''; rec.items = [];   // el nombre de la nota se conserva visible
   }
   if (!S.notes.includes(n)) S.notes.push(n);
   await DB.put('notes', rec);
@@ -424,7 +424,7 @@ async function leaveEditor(keepStack) {
   } else if (!n.deleted || S.notes.includes(n)) {
     if (S.notes.includes(n) || !isEmpty(n)) await persist(n);
   }
-  if (n.enc) { n.body = ''; n.html = ''; n.items = []; delete n._key; if (n.type === 'text') n.title = 'Nota cifrada'; }
+  if (n.enc) { if (n.type === 'text') n.title = noteTitle(n); n.body = ''; n.html = ''; n.items = []; delete n._key; }
   S.cur = null; S.find = null; $('linkBtn').hidden = true;
 }
 
