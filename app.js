@@ -1060,7 +1060,7 @@ let gToken = null, gExp = 0;
 const loadGIS = () => (window.google && google.accounts) ? Promise.resolve() : new Promise((res, rej) => {
   const s = el('script', { src: 'https://accounts.google.com/gsi/client', onload: res, onerror: () => rej(new Error('Sin conexión a internet')) }); document.head.append(s);
 });
-async function getToken() {
+async function getToken(auto) {
   if (gToken && Date.now() < gExp - 60000) return gToken;
   const cid = pref('gclient'); if (!cid) throw new Error('noclient');
   await loadGIS();
@@ -1068,9 +1068,9 @@ async function getToken() {
     const tc = google.accounts.oauth2.initTokenClient({
       client_id: cid, scope: 'https://www.googleapis.com/auth/drive.appdata', hint: pref('gemail') || undefined,
       callback: r => { if (r.error) rej(new Error(r.error_description || r.error)); else { gToken = r.access_token; gExp = Date.now() + r.expires_in * 1000; res(gToken); } },
-      error_callback: e => rej(new Error(e.type === 'popup_closed' ? 'Cancelaste el inicio de sesión' : (e.message || e.type))),
+      error_callback: e => rej(new Error(e.type === 'popup_failed_to_open' ? 'popup' : e.type === 'popup_closed' ? 'Cancelaste el inicio de sesión' : (e.message || e.type))),
     });
-    tc.requestAccessToken({ prompt: pref('gconsent') ? '' : 'select_account' });
+    tc.requestAccessToken({ prompt: auto ? 'none' : pref('gconsent') ? '' : 'select_account' });
   });
 }
 async function gfetch(url, opts = {}) {
@@ -1082,13 +1082,14 @@ async function gfetch(url, opts = {}) {
 const strip = n => { const o = {}; for (const k in n) if (k[0] !== '_') o[k] = n[k]; return o; };
 
 let syncing = false;
-async function syncDrive() {
-  if (syncing) return; if (S.cur) return;
-  if (!pref('gclient')) { await setClientId(true); if (!pref('gclient')) return; }
-  if (!navigator.onLine) { toast('Sin conexión a internet'); return; }
-  syncing = true; $('syncBtn').classList.add('spin'); toast('Sincronizando…');
+async function syncDrive(opts) {
+  const auto = !!(opts && opts.auto);                 // arranque automático: sin avisos molestos
+  if (syncing) return;
+  if (!pref('gclient')) { if (auto) return; await setClientId(true); if (!pref('gclient')) return; }
+  if (!navigator.onLine) { if (!auto) toast('Sin conexión a internet'); return; }
+  syncing = true; $('syncBtn').classList.add('spin'); if (!auto) toast('Sincronizando…');
   try {
-    await getToken(); pref('gconsent', '1');
+    await getToken(auto); pref('gconsent', '1');
     const q = encodeURIComponent(`name='${DRIVE_FILE}'`);
     const list = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id)`)).json();
     const fid = list.files && list.files[0] && list.files[0].id;
@@ -1096,6 +1097,8 @@ async function syncDrive() {
     if (fid) { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json(); R = { notes: d.notes || [], folders: d.folders || [], tomb: d.tomb || {} }; }
     const L = { notes: S.notes.map(strip), folders: S.folders, tomb: tombs() };
     const m = mergeData(L, R);
+    const openId = S.cur && S.cur.id;                    // la nota abierta no se toca en esta ronda
+    m.applyLocal = m.applyLocal.filter(n => n.id !== openId); m.delLocal = m.delLocal.filter(id => id !== openId);
     for (const n of m.applyLocal) { const i = S.notes.findIndex(x => x.id === n.id); const full = Object.assign(newNote(n.type || 'text'), n); i >= 0 ? S.notes[i] = full : S.notes.push(full); await DB.put('notes', full); }
     for (const id of m.delLocal) { S.notes = S.notes.filter(x => x.id !== id); await DB.del('notes', id); }
     for (const f of m.applyFolders) { S.folders.push(f); await DB.put('folders', f); }
@@ -1111,11 +1114,21 @@ async function syncDrive() {
       }
     }
     pref('lastSync', String(Date.now()));
-    toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`); renderMain();
+    if (!auto || m.applyLocal.length || m.delLocal.length) toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`);
+    renderMain();
   } catch (e) {
-    toast(e.message === 'noclient' ? 'Falta el ID de cliente de Google' : 'No se pudo sincronizar: ' + e.message);
+    if (auto) {
+      // Google exige un gesto del usuario para abrir su ventana: se reintenta con el primer toque.
+      if (/popup|interaction|login_required|consent/i.test(e.message)) armFirstTap(); else if (!/internet|network|fetch/i.test(e.message)) toast('Toca ⟳ para volver a conectar con Google');
+    } else toast(e.message === 'noclient' ? 'Falta el ID de cliente de Google' : 'No se pudo sincronizar: ' + e.message);
   } finally { syncing = false; $('syncBtn').classList.remove('spin'); }
 }
+let tapArmed = false;
+function armFirstTap() {
+  if (tapArmed) return; tapArmed = true;
+  document.addEventListener('pointerup', () => { tapArmed = false; syncDrive({ auto: true }); }, { once: true });
+}
+const autoSyncDue = () => pref('gclient') && pref('gconsent') && Date.now() - (+pref('lastSync') || 0) > 3 * 60000;
 async function setClientId(first) {
   const v = await ask(first ? 'Para sincronizar pega tu ID de cliente de Google (termina en .apps.googleusercontent.com)' : 'ID de cliente de Google', pref('gclient') || '');
   if (v === null) return;
@@ -1182,7 +1195,7 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) flush().catch(() => {}); else checkReminders(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flush().catch(() => {}); else { checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); } });
   addEventListener('pagehide', () => flush().catch(() => {}));
 }
 
@@ -1208,5 +1221,6 @@ async function init() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
   checkReminders(); setInterval(checkReminders, 30000);
+  if (pref('gclient') && pref('gconsent')) syncDrive({ auto: true });   // sincroniza al abrir la app
 }
 init();
