@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f66c9">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+<title>Notas</title>
+</head>
+<body>
+<noscript>Esta aplicación necesita JavaScript.</noscript>
+
+<!-- ===== Pantalla principal ===== -->
+<section id="main" class="screen">
+  <header class="bar" id="mainBar">
+    <span class="bar-title" id="mainTitle">Notas</span>
+    <button class="ib" id="addBtn" aria-label="Nueva nota"></button>
+    <button class="ib" id="folderBtn" aria-label="Carpetas"></button>
+    <button class="ib" id="searchBtn" aria-label="Buscar"></button>
+    <button class="ib" id="moreBtn" aria-label="Más"></button>
+  </header>
+  <header class="bar" id="selBar" hidden>
+    <button class="ib" id="selClose" aria-label="Cancelar"></button>
+    <span class="bar-title" id="selCount">0</span>
+    <button class="ib" id="selAll" aria-label="Seleccionar todo"></button>
+    <button class="ib" id="selMove" aria-label="Mover"></button>
+    <button class="ib" id="selDel" aria-label="Eliminar"></button>
+  </header>
+  <div id="searchBar" hidden><input id="searchInput" type="search" placeholder="Buscar en todas las notas…" autocomplete="off"></div>
+  <div id="folderBar"></div>
+  <div id="list"></div>
+  <div id="empty" hidden></div>
+</section>
+
+<!-- ===== Editor ===== -->
+<section id="editor" class="screen" hidden>
+  <header class="bar">
+    <button class="ib" id="edBack" aria-label="Volver"></button>
+    <span class="bar-title" id="edTitle"></span>
+    <button class="ib" id="edDel" aria-label="Eliminar"></button>
+    <button class="ib" id="edShare" aria-label="Compartir"></button>
+    <button class="ib" id="edInfo" aria-label="Información"></button>
+    <button class="ib" id="edMore" aria-label="Más"></button>
+  </header>
+  <div id="edToolsExtra"></div>
+  <div id="edBody">
+    <div id="edMedia"></div>
+    <div id="edText" contenteditable="true" spellcheck="true" data-ph=""></div>
+    <div id="edView" hidden></div>
+    <div id="checkWrap" hidden>
+      <div class="tabs"><button data-t="all" class="on">Todos</button><button data-t="need">Pendientes</button><button data-t="done">Hechos</button></div>
+      <div id="checkList"></div>
+    </div>
+    <div id="drawWrap" hidden><canvas id="canvas"></canvas></div>
+  </div>
+  <button id="linkBtn" hidden></button>
+  <div id="fmtBar" hidden></div>
+  <div id="findBar" hidden>
+    <input id="findInput" placeholder="Buscar en la nota…" autocomplete="off">
+    <button class="ib" id="findPrev" aria-label="Anterior"></button>
+    <button class="ib" id="findNext" aria-label="Siguiente"></button>
+  </div>
+  <div id="addBar" hidden>
+    <input id="addInput" placeholder="Escribe y pulsa Intro para añadir…" autocomplete="off">
+    <button class="ib" id="addItem" aria-label="Añadir"></button>
+    <button class="ib" id="addMic" aria-label="Dictar"></button>
+    <button class="ib" id="addSort" aria-label="Ordenar"></button>
+  </div>
+  <div id="drawStatus" hidden></div>
+</section>
+
+<!-- ===== Selector de carpeta ===== -->
+<section id="folders" class="screen" hidden>
+  <header class="bar">
+    <button class="ib" id="fdBack" aria-label="Volver"></button>
+    <span class="bar-title" id="fdTitle">Seleccionar carpeta</span>
+    <button class="ib" id="fdMore" aria-label="Más"></button>
+  </header>
+  <div class="hint" id="fdHint"><span class="q">?</span><span>Elige la carpeta que quieras. Toca una carpeta para seleccionarla; mantén pulsado para renombrar, borrar o crear subcarpetas.</span></div>
+  <div id="fdList"></div>
+</section>
+
+<!-- ===== Ajustes ===== -->
+<section id="settings" class="screen" hidden>
+  <header class="bar">
+    <button class="ib" id="stBack" aria-label="Volver"></button>
+    <span class="bar-title">Ajustes</span>
+  </header>
+  <div id="stList"></div>
+</section>
+
+<div id="overlay" hidden></div>
+<div id="toast" hidden></div>
+<div id="printArea"></div>
+<input id="fileIn" type="file" hidden>
+<script src="app.js"></script>
+</body>
+</html>
