@@ -137,9 +137,11 @@ async function decryptWith(n, key) {
   const o = JSON.parse(new TextDecoder().decode(pt));
   n.body = o.body; n.html = o.html || ''; n.items = o.items; n._key = key;
 }
+let sessionPw = null;   // contraseña única de las notas: solo en memoria, se pide una vez por sesión
 async function unlock(n) {
   if (!n.enc || n._key) return true;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS'); return false; }
+  if (sessionPw) { try { await decryptWith(n, await deriveKey(sessionPw, unb64(n.enc.s))); return true; } catch (e) {} }
   if (await bioUnlock(n)) return true;                      // huella, si está activada para esta nota
   for (;;) {
     const inp = el('input', { type: 'password' });
@@ -148,7 +150,7 @@ async function unlock(n) {
     setTimeout(() => inp.focus(), 50); inp.onkeydown = e => { if (e.key === 'Enter') $('overlay').querySelector('.btns button:last-child').click(); };
     const r = await dp; if (r === null) return false;
     if (r === 'forgot') { if (await recoverNote(n)) return true; continue; }
-    try { await decryptWith(n, await deriveKey(inp.value, unb64(n.enc.s))); setTimeout(() => offerBio(n), 500); return true; }
+    try { await decryptWith(n, await deriveKey(inp.value, unb64(n.enc.s))); sessionPw = inp.value; setTimeout(() => offerBio(n), 500); return true; }
     catch (e) { toast('Contraseña incorrecta'); }
   }
 }
@@ -966,8 +968,19 @@ async function toggleEncrypt() {
   const n = S.cur;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS (o localhost)'); return; }
   if (n.enc) { if (!(await confirmD('¿Quitar el cifrado de esta nota?'))) return; n.enc = null; delete n._key; bioForget(n.id); touch(); toast('Cifrado quitado'); drawEditor(); return; }
-  const p1 = await ask('Nueva contraseña', '', 'password'); if (!p1) return;
-  const p2 = await ask('Repite la contraseña', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return; }
+  let p1 = sessionPw;
+  if (!p1) {
+    const other = S.notes.find(x => x.enc && x.enc.iv && x.id !== n.id);
+    if (other) {   // ya hay notas cifradas: se reutiliza su contraseña (la misma para todas)
+      p1 = await ask('Tu contraseña de las notas cifradas (la misma para todas)', '', 'password'); if (!p1) return;
+      try { await deriveKey(p1, unb64(other.enc.s)).then(k => crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(other.enc.iv) }, k, unb64(other.enc.d))); }
+      catch (e) { toast('No es la contraseña de tus otras notas cifradas'); return; }
+    } else {
+      p1 = await ask('Contraseña para tus notas (será la misma para todas las que cifres)', '', 'password'); if (!p1) return;
+      const p2 = await ask('Repite la contraseña', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return; }
+    }
+    sessionPw = p1;
+  }
   const salt = crypto.getRandomValues(new Uint8Array(16));
   bioForget(n.id); n.enc = { s: b64(salt), iv: '', d: '' }; n._key = await deriveKey(p1, salt);
   touch(); toast('Nota cifrada. No hay forma de recuperar la contraseña.'); drawEditor();
@@ -1463,6 +1476,7 @@ async function verifyCurrentPin() {
   if (await checkPin(p)) return true; toast('PIN incorrecto'); return false;
 }
 function showLock() {
+  sessionPw = null;
   if (!lock.on || lock.shown) return; lock.shown = true;
   $('lockScreen').hidden = false; $('lockPin').value = ''; $('lockMsg').textContent = ''; $('lockBio').hidden = !lock.bio;
   setTimeout(() => { $('lockPin').focus(); if (lock.bio) lockWithBio(true); }, 150);
