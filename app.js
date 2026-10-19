@@ -219,7 +219,7 @@ function renderMain() {
   const sel = S.selMode;
   $('mainBar').hidden = sel; $('selBar').hidden = !sel;
   $('selCount').textContent = S.sel.size + ' seleccionadas';
-  $('mainTitle').textContent = 'Note Everything';
+  $('mainTitle').textContent = 'Notas_EnPlus';
   $('folderBar').innerHTML = ic(S.view.kind === 'trash' ? 'trash' : 'folder');
   $('folderBar').append(' ' + viewName());
   $('folderBar').onclick = () => pickFolder();
