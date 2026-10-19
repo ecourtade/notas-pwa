@@ -27,12 +27,14 @@
     <button class="ib" id="selClose" aria-label="Cancelar"></button>
     <span class="bar-title" id="selCount">0</span>
     <button class="ib" id="selAll" aria-label="Seleccionar todo"></button>
+    <button class="ib" id="selTag" aria-label="Etiquetar"></button>
     <button class="ib" id="selMove" aria-label="Mover"></button>
     <button class="ib" id="selDel" aria-label="Eliminar"></button>
   </header>
-  <div id="searchBar" hidden><input id="searchInput" type="search" placeholder="Buscar en todas las notas…" autocomplete="off"></div>
+  <div id="searchBar" hidden><input id="searchInput" type="search" placeholder="Buscar… (usa #etiqueta)" autocomplete="off"><button class="ib" id="searchFilter" aria-label="Filtros"></button></div>
   <div id="folderBar"></div>
   <div id="syncBar"></div>
+  <div id="filterBar" hidden></div>
   <div id="list"></div>
   <div id="empty" hidden></div>
 </section>
@@ -48,6 +50,7 @@
     <button class="ib" id="edMore" aria-label="Más"></button>
   </header>
   <div id="edToolsExtra"></div>
+  <div id="edLabels" hidden></div>
   <div id="edBody">
     <div id="edMedia"></div>
     <div id="edText" contenteditable="true" spellcheck="true" data-ph=""></div>

@@ -32,13 +32,14 @@ const ICONS = {
   bell: '<path d="M6 16v-5a6 6 0 0112 0v5l2 2H4zM10 21h4"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
   sync: '<path d="M20 11a8 8 0 00-14-4M4 4v4h4M4 13a8 8 0 0014 4M20 20v-4h-4"/>', brush: '<path d="M4 20l5-1 9-9-4-4-9 9zM14 6l4 4"/>',
   redo: '<path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3"/>',
+  tag: '<path d="M3 12V4h8l9 9-8 8z"/><circle cx="7.5" cy="8" r="1" fill="currentColor"/>', filter: '<path d="M3 5h18l-7 8v6l-4-2v-4z"/>',
   link: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
   sort: '<path d="M4 6h16M4 12h11M4 18h6"/>', selall: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 12l4 4 6-8"/>',
   move: '<path d="M3 6h7l2 2h9v11H3z"/><path d="M9 14h7M13 11l3 3-3 3"/>',
 };
 const ic = n => `<svg class="ic" viewBox="0 0 24 24">${ICONS[n]}</svg>`;
 const setIcons = () => {
-  const map = { ckUndo: 'undo', ckRedo: 'redo', syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
+  const map = { selTag: 'tag', searchFilter: 'filter', ckUndo: 'undo', ckRedo: 'redo', syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
     edBack: 'back', edDel: 'trash', edShare: 'share', edInfo: 'info', edMore: 'more', findPrev: 'up', findNext: 'down', addItem: 'plus', addMic: 'mic', addSort: 'sort', fdBack: 'back', fdMore: 'more', stBack: 'back' };
   for (const [id, n] of Object.entries(map)) $(id).innerHTML = ic(n);
 };
@@ -174,7 +175,7 @@ function noteTitle(n) {
 const isEmpty = n => ({ text: !n.body.trim(), check: !n.items.some(i => i.t.trim()), voice: !n.media && !n.body.trim(), draw: !(n.strokes && n.strokes.length) && !n.bg, photo: !n.media && !n.body.trim() }[n.type]);
 function newNote(type, folder) {
   const n = { id: uid(), type, title: '', body: '', items: [], folder: folder || 'main', color: '', readonly: false, enc: null, reminder: null, fired: false,
-    media: null, strokes: [], html: '', deleted: null, created: Date.now(), updated: Date.now() };
+    media: null, strokes: [], html: '', labels: [], deleted: null, created: Date.now(), updated: Date.now() };
   if (type !== 'text') n.title = TYPE_NAME[type] + ' ' + (S.notes.filter(x => x.type === type).length + 1);
   if (type === 'check') n.items = [];
   return n;
@@ -215,17 +216,24 @@ function viewName() {
   return v.kind === 'all' ? 'Todas las notas' : v.kind === 'trash' ? 'Papelera' : folderName(v.id);
 }
 function visibleNotes() {
-  const q = S.q.trim().toLowerCase(), v = S.view;
+  const v = S.view, f = S.filter, toks = S.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const tagQ = toks.filter(t => t[0] === '#' && t.length > 1).map(t => t.slice(1)), q = toks.filter(t => t[0] !== '#').join(' ');
+  const searching = !!(q || tagQ.length), scopeAll = v.kind === 'all' || (f.allFolders && v.kind === 'folder');
   let ns = S.notes.filter(n => {
     if (v.kind === 'trash') return !!n.deleted;
     if (n.deleted) return false;
-    if (q) return true;
-    return v.kind === 'all' || n.folder === v.id;
+    if (searching) return true;
+    return scopeAll || n.folder === v.id;
   });
-  if (q) ns = ns.filter(n => [noteTitle(n), n.body, n.title, ...n.items.map(i => i.t)].join('\n').toLowerCase().includes(q));
-  const dir = settings.desc ? -1 : 1, f = settings.sort;
+  if (searching) ns = ns.filter(n => {
+    const ls = noteLabels(n).map(labelKey);
+    if (tagQ.length && !tagQ.every(t => ls.some(l => l.includes(t)))) return false;
+    return !q || [noteTitle(n), n.body, n.title, ...n.items.map(i => i.t), ...ls].join('\n').toLowerCase().includes(q);
+  });
+  if (filterActive(f)) ns = ns.filter(n => matchesFilter(n));
+  const dir = settings.desc ? -1 : 1, so = settings.sort;
   return ns.sort((a, b) => {
-    const c = f === 'title' ? noteTitle(a).localeCompare(noteTitle(b)) : f === 'type' ? a.type.localeCompare(b.type) : (a[f === 'created' ? 'created' : 'updated'] - b[f === 'created' ? 'created' : 'updated']);
+    const c = so === 'title' ? noteTitle(a).localeCompare(noteTitle(b)) : so === 'type' ? a.type.localeCompare(b.type) : (a[so === 'created' ? 'created' : 'updated'] - b[so === 'created' ? 'created' : 'updated']);
     return c * dir;
   });
 }
@@ -251,14 +259,16 @@ function renderMain() {
       n.color ? Object.assign(el('span', { className: 'stripe' }), { style: `background:${n.color}` }) : null,
       el('span', { innerHTML: TYPE_ICON[n.type] }),
       el('div', { className: 'mid' }, el('div', { className: 't', textContent: noteTitle(n) }),
-        (n.enc || n.reminder || n.readonly) ? el('div', { className: 's', innerHTML: (n.enc ? ic('lock') : '') + (n.reminder ? ic('bell') : '') + (n.readonly ? '<span>solo lectura</span>' : '') }) : null),
+        (n.enc || n.reminder || n.readonly) ? el('div', { className: 's', innerHTML: (n.enc ? ic('lock') : '') + (n.reminder ? ic('bell') : '') + (n.readonly ? '<span>solo lectura</span>' : '') }) : null,
+        noteLabels(n).length ? el('div', { className: 'chips' }, noteLabels(n).slice(0, 4).map(l => labelChip(l, { onclick: e => { e.stopPropagation(); applyLabelFilter(l); } })), noteLabels(n).length > 4 ? el('span', { className: 'fnote', textContent: '+' + (noteLabels(n).length - 4) }) : null) : null),
       el('div', { className: 'd', textContent: fmtDate(n.updated) }));
     pressable(row, () => noteTap(n), () => noteHold(n));
     rows.push(row);
   }
   list.append(...rows);
   $('empty').hidden = rows.length > 0;
-  $('empty').textContent = S.q ? 'Sin resultados' : S.view.kind === 'trash' ? 'La papelera está vacía' : 'Aún no hay notas.\nToca + para crear una.';
+  renderFilterBar();
+  $('empty').textContent = S.q || filterActive() ? 'Sin resultados' : S.view.kind === 'trash' ? 'La papelera está vacía' : 'Aún no hay notas.\nToca + para crear una.';
   $('empty').style.whiteSpace = 'pre-line';
   $('addBtn').hidden = S.view.kind === 'trash';
 }
@@ -294,6 +304,9 @@ function mainMenu() {
   menu([
     { t: 'Seleccionar notas', fn: () => { S.selMode = true; S.sel = new Set(); renderMain(); toast('Mantén pulsada una nota para seleccionarla'); } },
     { t: 'Ordenar…', fn: sortMenu },
+    { t: filterActive() ? 'Filtros… (hay filtros activos)' : 'Filtros…', fn: filterDialog },
+    views().length ? { t: 'Vistas guardadas', fn: viewsMenu } : null,
+    { t: 'Etiquetas…', fn: () => manageLabels(false) },
     S.view.kind === 'folder' ? { t: 'Nueva subcarpeta', fn: () => newFolder(S.view.id) } : null,
     S.view.kind === 'trash' ? { t: 'Vaciar papelera', fn: emptyTrash } : null,
     '-', { t: 'Ajustes', fn: () => { renderSettings(); openScreen('settings'); } },
@@ -440,7 +453,7 @@ async function leaveEditor(keepStack) {
 
 function drawEditor() {
   const n = S.cur, t = n.type, ro = n.readonly || !!n.deleted;
-  $('edTitle').textContent = noteTitle(n);
+  $('edTitle').textContent = noteTitle(n); drawEdLabels();
   $('edBody').style.display = '';
   const isText = t === 'text' || t === 'voice' || t === 'photo';
   $('edText').hidden = !isText || ro || !!S.find; setRich(n); $('edText').contentEditable = ro ? 'false' : 'true';
@@ -894,6 +907,7 @@ function editorMenu() {
   const n = S.cur, t = n.type;
   menu([
     { t: 'Deshacer  (Ctrl+Z)', fn: undo }, { t: 'Rehacer  (Ctrl+Y)', fn: redo }, '-',
+    { t: 'Etiquetas…', fn: async () => { if (n.deleted) return; if (await labelsDialog([n])) drawEdLabels(); } },
     t !== 'text' ? { t: 'Renombrar', fn: async () => { const v = await ask('Título', n.title); if (v !== null) { n.title = v; touch(); drawEditor(); } } } : null,
     t === 'draw' ? { t: 'Lápiz y colores…', fn: penDialog } : null,
     t === 'draw' ? { t: 'Borrar dibujo', fn: async () => { if (await confirmD('¿Borrar todo el dibujo?')) { H.u.push({ t: 'clear', s: n.strokes }); H.r = []; n.strokes = []; S.redraw(); touch(); } } } : null,
@@ -991,6 +1005,7 @@ function renderSettings() {
   sec('Apariencia');
   item('Tema', settings.theme === 'dark' ? 'Oscuro' : 'Claro', () => { settings.theme = settings.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = settings.theme; renderSettings(); });
   item('Enlaces wiki (PalabrasWiki y [[Nota]])', settings.wiki ? 'Activados' : 'Desactivados', () => { settings.wiki = !settings.wiki; renderSettings(); });
+  item('Etiquetas', allLabels().length ? allLabels().length + ' etiqueta(s): renombrar, eliminar o ver sus notas' : 'Aún no hay etiquetas (se crean desde una nota)', () => manageLabels(true));
   sec('Seguridad');
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
@@ -1831,6 +1846,173 @@ function updateSyncStat() {
   e.textContent = t; e.className = cls;
 }
 
+/* ============ Etiquetas y filtros ============ */
+// Las etiquetas son textos guardados en cada nota (n.labels). No hay registro aparte: la lista sale de las notas,
+// así viajan solas con la sincronización, las copias y la carpeta espejo. El color de cada etiqueta se calcula del nombre.
+const noteLabels = n => n.labels || [];
+const labelKey = s => String(s).trim().toLowerCase();
+function labelColor(name) { let h = 0; for (const c of labelKey(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return `hsl(${h} 55% 42%)`; }
+function allLabels() {
+  const m = new Map();
+  for (const n of S.notes) { if (n.deleted) continue; for (const l of noteLabels(n)) { const k = labelKey(l); if (!m.has(k)) m.set(k, { name: l, count: 0 }); m.get(k).count++; } }
+  return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+const canonLabel = name => { const k = labelKey(name), f = allLabels().find(l => labelKey(l.name) === k); return f ? f.name : String(name).trim().slice(0, 30); };
+function setLabel(n, name, on) {
+  const k = labelKey(name), rest = noteLabels(n).filter(l => labelKey(l) !== k);
+  if (on) rest.push(canonLabel(name)); n.labels = rest;
+}
+const labelChip = (name, extra) => Object.assign(el('span', { className: 'lchip', textContent: name }), { style: `background:${labelColor(name)}` }, extra || {});
+
+// --- asignar etiquetas a una o varias notas ---
+async function labelsDialog(notes) {
+  const rows = new Map(), box = el('div', { className: 'lbl-list' });
+  const addRow = (name, state, touched) => {
+    const k = labelKey(name); if (rows.has(k)) { rows.get(k).cb.checked = true; rows.get(k).touched = true; return; }
+    const cb = el('input', { type: 'checkbox', checked: state === 'all' || touched, style: 'width:auto;margin:0 8px 0 0' }); cb.indeterminate = state === 'some';
+    const r = { name, cb, touched: !!touched }; cb.onchange = () => { r.touched = true; };
+    rows.set(k, r); box.append(el('label', { className: 'lbl-row' }, cb, labelChip(name)));
+  };
+  for (const l of allLabels()) {
+    const k = labelKey(l.name), c = notes.filter(n => noteLabels(n).some(x => labelKey(x) === k)).length;
+    addRow(l.name, c === 0 ? 'none' : c === notes.length ? 'all' : 'some');
+  }
+  const inp = el('input', { placeholder: 'Nueva etiqueta…', maxLength: 30 });
+  const add = () => { const v = inp.value.trim(); if (v) { addRow(canonLabel(v), 'all', true); inp.value = ''; } };
+  inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); add(); } };
+  const head = el('div', { className: 'muted', textContent: notes.length > 1 ? `Se aplican a ${notes.length} notas` : 'Marca las etiquetas de esta nota' });
+  const r = await dialog('Etiquetas', el('div', {}, head, inp, el('button', { className: 'fchip', textContent: '＋ Añadir', onclick: add }), box), [{ t: 'Cancelar', v: null }, { t: 'Aceptar', v: true }]);
+  if (!r) return false;
+  add();                                   // por si escribió una etiqueta y pulsó Aceptar sin añadirla
+  for (const n of notes) {
+    let changed = false;
+    for (const row of rows.values()) if (row.touched) { const had = noteLabels(n).some(l => labelKey(l) === labelKey(row.name)); if (had !== row.cb.checked) { setLabel(n, row.name, row.cb.checked); changed = true; } }
+    if (!changed) continue;
+    if (n === S.cur) touch(); else { n.updated = Date.now(); await persist(n); }
+  }
+  return true;
+}
+function drawEdLabels() {
+  const n = S.cur, e = $('edLabels'); if (!n || !e) return;
+  const ls = noteLabels(n); e.hidden = !ls.length;
+  e.replaceChildren(...ls.map(l => labelChip(l)), el('span', { className: 'lchip add', textContent: '＋ etiqueta' }));
+  e.onclick = async () => { if (n.readonly || n.deleted) return; if (await labelsDialog([n])) drawEdLabels(); };
+}
+
+// --- administrar etiquetas (renombrar, eliminar, ver notas) ---
+function applyLabelFilter(name) { S.filter = Object.assign(emptyFilter(), { labels: [labelKey(name)] }); renderMain(); }
+function manageLabels(fromSettings) {
+  const ls = allLabels();
+  if (!ls.length) { toast('Aún no hay etiquetas. Créalas desde una nota: ⋮ → Etiquetas'); return; }
+  menu(ls.map(l => ({ t: `${l.name}  (${l.count})`, fn: () => menu([
+    { t: 'Ver las notas con esta etiqueta', fn: () => { S.filter = Object.assign(emptyFilter(), { labels: [labelKey(l.name)] }); if (fromSettings) closeScreen(); else renderMain(); } },
+    { t: 'Renombrar', fn: async () => {
+      const v = await ask('Nuevo nombre de la etiqueta', l.name); if (!v || !v.trim() || v.trim() === l.name) return;
+      const to = canonLabel(v), k = labelKey(l.name);
+      for (const n of S.notes.filter(n => noteLabels(n).some(x => labelKey(x) === k))) { setLabel(n, l.name, false); setLabel(n, to, true); n.updated = Date.now(); await persist(n); }
+      S.filter = emptyFilter(); toast(`Etiqueta renombrada a "${to}"`); renderMain();
+    } },
+    { t: 'Eliminar de todas las notas', fn: async () => {
+      if (!(await confirmD(`¿Quitar la etiqueta "${l.name}" de ${l.count} nota(s)? Las notas no se borran.`))) return;
+      const k = labelKey(l.name);
+      for (const n of S.notes.filter(n => noteLabels(n).some(x => labelKey(x) === k))) { setLabel(n, l.name, false); n.updated = Date.now(); await persist(n); }
+      S.filter = emptyFilter(); toast('Etiqueta eliminada'); renderMain();
+    } },
+  ]) })));
+}
+
+// --- filtros combinados ---
+function emptyFilter() { return { labels: [], mode: 'all', noLabel: false, types: [], colors: [], reminder: false, enc: false, readonly: false, range: '', from: null, to: null, allFolders: false }; }
+S.filter = emptyFilter();
+const filterActive = (f = S.filter) => !!(f.labels.length || f.noLabel || f.types.length || f.colors.length || f.reminder || f.enc || f.readonly || f.range);
+const RANGES = [['', 'Cualquier fecha'], ['today', 'Hoy'], ['7d', 'Últimos 7 días'], ['30d', 'Últimos 30 días'], ['year', 'Este año'], ['custom', 'Entre dos fechas…']];
+function rangeBounds(f) {
+  const now = Date.now(), d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  switch (f.range) {
+    case 'today': return [d0.getTime(), Infinity];
+    case '7d': return [now - 7 * 864e5, Infinity];
+    case '30d': return [now - 30 * 864e5, Infinity];
+    case 'year': return [new Date(d0.getFullYear(), 0, 1).getTime(), Infinity];
+    case 'custom': return [f.from || 0, f.to || Infinity];
+    default: return [0, Infinity];
+  }
+}
+function matchesFilter(n) {
+  const f = S.filter, ls = noteLabels(n).map(labelKey);
+  if (f.labels.length || f.noLabel) {
+    const okL = f.labels.length && (f.mode === 'any' ? f.labels.some(k => ls.includes(k)) : f.labels.every(k => ls.includes(k)));
+    const okN = f.noLabel && !ls.length;
+    if (!okL && !okN) return false;
+  }
+  if (f.types.length && !f.types.includes(n.type)) return false;
+  if (f.colors.length && !f.colors.includes(n.color || '')) return false;
+  if (f.reminder && !n.reminder) return false;
+  if (f.enc && !n.enc) return false;
+  if (f.readonly && !n.readonly) return false;
+  if (f.range) { const [a, b] = rangeBounds(f); if (n.updated < a || n.updated > b) return false; }
+  return true;
+}
+const toggleIn = (arr, v) => { const i = arr.indexOf(v); i >= 0 ? arr.splice(i, 1) : arr.push(v); };
+async function filterDialog() {
+  const d = JSON.parse(JSON.stringify(S.filter)), wrap = el('div', {});
+  const sec = t => wrap.append(el('div', { className: 'fsec', textContent: t }));
+  const chip = (par, text, isOn, toggle, css) => { const b = el('button', { className: 'fchip' + (isOn() ? ' on' : ''), textContent: text, onclick: () => { toggle(); b.classList.toggle('on', isOn()); } }); if (css) b.style.cssText = css; par.append(b); return b; };
+  const ls = allLabels();
+  sec('Etiquetas'); const rl = el('div');
+  if (!ls.length) rl.append(el('span', { className: 'muted', textContent: 'Aún no hay etiquetas' }));
+  for (const l of ls) chip(rl, `${l.name} (${l.count})`, () => d.labels.includes(labelKey(l.name)), () => toggleIn(d.labels, labelKey(l.name)), `border-color:${labelColor(l.name)}`);
+  chip(rl, 'Sin etiqueta', () => d.noLabel, () => { d.noLabel = !d.noLabel; });
+  chip(rl, 'Basta con una de las elegidas', () => d.mode === 'any', () => { d.mode = d.mode === 'any' ? 'all' : 'any'; }, 'border-style:dashed');
+  wrap.append(rl);
+  sec('Tipo de nota'); const rt = el('div'); for (const t of ['text', 'check', 'voice', 'draw', 'photo']) chip(rt, TYPE_NAME[t], () => d.types.includes(t), () => toggleIn(d.types, t)); wrap.append(rt);
+  sec('Color de la nota'); const rc = el('div');
+  NOTE_COLORS.forEach(c => { const b = chip(rc, c ? '' : 'Sin color', () => d.colors.includes(c), () => toggleIn(d.colors, c)); if (c) b.style.cssText = `background:${c};min-width:34px;height:30px;padding:0`; }); wrap.append(rc);
+  sec('Estado'); const rs = el('div');
+  chip(rs, 'Con recordatorio', () => d.reminder, () => { d.reminder = !d.reminder; }); chip(rs, 'Cifradas', () => d.enc, () => { d.enc = !d.enc; }); chip(rs, 'Solo lectura', () => d.readonly, () => { d.readonly = !d.readonly; });
+  if (S.view.kind === 'folder') chip(rs, 'Incluir todas las carpetas', () => d.allFolders, () => { d.allFolders = !d.allFolders; });
+  wrap.append(rs);
+  sec('Modificadas'); const sel = el('select', {}, RANGES.map(([v, t]) => el('option', { value: v, textContent: t, selected: d.range === v })));
+  const iso = t => t ? new Date(t - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 10) : '';
+  const from = el('input', { type: 'date', value: iso(d.from) }), to = el('input', { type: 'date', value: iso(d.to) }), custom = el('div', {}, el('div', { className: 'muted', textContent: 'Desde' }), from, el('div', { className: 'muted', textContent: 'Hasta' }), to);
+  custom.hidden = d.range !== 'custom'; sel.onchange = () => { d.range = sel.value; custom.hidden = d.range !== 'custom'; };
+  wrap.append(sel, custom);
+  const r = await dialog('Filtrar notas', wrap, [{ t: 'Cancelar', v: null }, { t: 'Limpiar', v: 'clear' }, { t: 'Guardar vista', v: 'save' }, { t: 'Aplicar', v: true }]);
+  if (r === null) return;
+  if (r === 'clear') S.filter = emptyFilter();
+  else {
+    d.from = from.value ? new Date(from.value + 'T00:00:00').getTime() : null; d.to = to.value ? new Date(to.value + 'T23:59:59.999').getTime() : null;
+    S.filter = d;
+    if (r === 'save') { const nm = await ask('Nombre de la vista', ''); if (nm && nm.trim()) saveView(nm.trim(), d); }
+  }
+  renderMain();
+}
+const views = () => { try { return JSON.parse(pref('views') || '[]'); } catch (e) { return []; } };
+function saveView(name, f) { const l = views().filter(v => v.name !== name); l.push({ name, filter: f }); pref('views', JSON.stringify(l)); toast(`Vista "${name}" guardada`); }
+function viewsMenu() {
+  menu(views().map(v => ({ t: v.name, fn: () => menu([
+    { t: 'Aplicar esta vista', fn: () => { S.filter = Object.assign(emptyFilter(), v.filter); renderMain(); } },
+    { t: 'Eliminar la vista', fn: () => { pref('views', JSON.stringify(views().filter(x => x.name !== v.name))); toast('Vista eliminada'); } },
+  ]) })));
+}
+// --- barra de filtros activos (con ✕ para quitar cada uno) ---
+function renderFilterBar() {
+  const bar = $('filterBar'); if (!bar) return; bar.replaceChildren();
+  const f = S.filter, parts = [];
+  const add = (node, remove) => { node.onclick = () => { remove(); renderMain(); }; node.classList.add('rm'); parts.push(node); };
+  for (const k of f.labels) { const nm = (allLabels().find(l => labelKey(l.name) === k) || { name: k }).name; add(labelChip('#' + nm), () => toggleIn(f.labels, k)); }
+  if (f.labels.length > 1) parts.push(el('span', { className: 'fnote', textContent: f.mode === 'any' ? 'cualquiera' : 'todas' }));
+  if (f.noLabel) add(el('span', { className: 'fchip on', textContent: 'Sin etiqueta ✕' }), () => { f.noLabel = false; });
+  for (const t of f.types) add(el('span', { className: 'fchip on', textContent: TYPE_NAME[t] + ' ✕' }), () => toggleIn(f.types, t));
+  for (const c of f.colors) { const s = el('span', { className: 'fchip on', textContent: c ? '● ✕' : 'Sin color ✕' }); if (c) s.style.color = c; add(s, () => toggleIn(f.colors, c)); }
+  if (f.reminder) add(el('span', { className: 'fchip on', textContent: 'Recordatorio ✕' }), () => { f.reminder = false; });
+  if (f.enc) add(el('span', { className: 'fchip on', textContent: 'Cifradas ✕' }), () => { f.enc = false; });
+  if (f.readonly) add(el('span', { className: 'fchip on', textContent: 'Solo lectura ✕' }), () => { f.readonly = false; });
+  if (f.range) add(el('span', { className: 'fchip on', textContent: (RANGES.find(r => r[0] === f.range) || ['', ''])[1] + ' ✕' }), () => { f.range = ''; });
+  if (f.allFolders) parts.push(el('span', { className: 'fnote', textContent: 'todas las carpetas' }));
+  if (parts.length && filterActive(f)) { const clr = el('button', { className: 'fchip', textContent: 'Limpiar filtros', onclick: () => { S.filter = emptyFilter(); renderMain(); } }); parts.push(clr); }
+  bar.hidden = !(filterActive(f)); if (filterActive(f)) bar.append(...parts);
+}
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
@@ -1839,6 +2021,8 @@ function wire() {
   $('searchBtn').onclick = () => { const b = $('searchBar'); b.hidden = !b.hidden; if (b.hidden) { S.q = ''; $('searchInput').value = ''; renderMain(); } else $('searchInput').focus(); };
   $('searchInput').oninput = e => { S.q = e.target.value; renderMain(); };
   $('selClose').onclick = endSel;
+  $('searchFilter').onclick = filterDialog;
+  $('selTag').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id)); if (await labelsDialog(ns)) endSel(); };
   $('selAll').onclick = () => { visibleNotes().forEach(n => S.sel.add(n.id)); renderMain(); };
   $('selDel').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id)); endSel(); await trashNotes(ns); renderMain(); };
   $('selMove').onclick = async () => { const f = await pickFolder(true); if (!f) return; for (const n of S.notes.filter(n => S.sel.has(n.id))) { n.folder = f; await persist(n); } endSel(); toast('Notas movidas a ' + folderName(f)); };
