@@ -27,13 +27,14 @@ const ICONS = {
   rec: '<circle cx="12" cy="12" r="8" fill="currentColor"/>', undo: '<path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3"/>',
   bell: '<path d="M6 16v-5a6 6 0 0112 0v5l2 2H4zM10 21h4"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
   sync: '<path d="M20 11a8 8 0 00-14-4M4 4v4h4M4 13a8 8 0 0014 4M20 20v-4h-4"/>', brush: '<path d="M4 20l5-1 9-9-4-4-9 9zM14 6l4 4"/>',
+  redo: '<path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3"/>',
   link: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
   sort: '<path d="M4 6h16M4 12h11M4 18h6"/>', selall: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 12l4 4 6-8"/>',
   move: '<path d="M3 6h7l2 2h9v11H3z"/><path d="M9 14h7M13 11l3 3-3 3"/>',
 };
 const ic = n => `<svg class="ic" viewBox="0 0 24 24">${ICONS[n]}</svg>`;
 const setIcons = () => {
-  const map = { syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
+  const map = { ckUndo: 'undo', ckRedo: 'redo', syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
     edBack: 'back', edDel: 'trash', edShare: 'share', edInfo: 'info', edMore: 'more', findPrev: 'up', findNext: 'down', addItem: 'plus', addMic: 'mic', addSort: 'sort', fdBack: 'back', fdMore: 'more', stBack: 'back' };
   for (const [id, n] of Object.entries(map)) $(id).innerHTML = ic(n);
 };
@@ -86,12 +87,12 @@ const info = (title, text) => dialog(title, el('p', { textContent: text }), [{ t
 
 /* ============ Almacenamiento ============ */
 const DB = {
-  idb: null, mem: { notes: {}, folders: {} },
+  idb: null, mem: { notes: {}, folders: {}, backups: {}, meta: {} },
   async open() {
     try {
       this.idb = await Promise.race([new Promise((res, rej) => {
-        const r = indexedDB.open('notas', 2);
-        r.onupgradeneeded = () => { for (const s of ['notes', 'folders']) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
+        const r = indexedDB.open('notas', 3);
+        r.onupgradeneeded = () => { for (const s of ['notes', 'folders', 'backups', 'meta']) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
         r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
       }), sleep(4000).then(() => { throw new Error('timeout'); })]);
     } catch (e) {            // sin IndexedDB (p. ej. file://): se usa localStorage
@@ -106,8 +107,8 @@ const DB = {
     });
   },
   flush() { pref('notas_fb', JSON.stringify(this.mem)); },
-  async all(s) { return this.idb ? this.tx(s, 'readonly', o => o.getAll()) : Object.values(this.mem[s]); },
-  async put(s, v) { if (this.idb) return this.tx(s, 'readwrite', o => o.put(v)); this.mem[s][v.id] = v; this.flush(); },
+  async all(s) { return this.idb ? this.tx(s, 'readonly', o => o.getAll()) : Object.values(this.mem[s] || {}); },
+  async put(s, v) { if (this.idb) return this.tx(s, 'readwrite', o => o.put(v)); (this.mem[s] = this.mem[s] || {})[v.id] = v; this.flush(); },
   async del(s, id) { if (this.idb) return this.tx(s, 'readwrite', o => o.delete(id)); delete this.mem[s][id]; this.flush(); },
 };
 
@@ -397,7 +398,7 @@ async function openNote(n, isNew, replace) {
   if (replace && S.stack[S.stack.length - 1] === 'editor') { await leaveEditor(true); }
   S.cur = n; S.find = null; S.tab = 'all';
   if (!replace || S.stack[S.stack.length - 1] !== 'editor') openScreen('editor');
-  drawEditor();
+  drawEditor(); histReset();
   if (n.deleted) toast('Esta nota está en la papelera', 'Restaurar', async () => { n.deleted = null; await persist(n); drawEditor(); });
   if (isNew && !n.readonly) setTimeout(() => { if (n.type === 'text') $('edText').focus(); else if (n.type === 'check') $('addInput').focus(); }, 80);
 }
@@ -407,6 +408,7 @@ function touch() {
   const n = S.cur; if (!n || n.deleted) return;
   n.updated = Date.now(); clearTimeout(S.timer);
   S.timer = setTimeout(() => flush().catch(() => {}), 400);
+  histNote();
 }
 async function leaveEditor(keepStack) {
   const n = S.cur; if (!n) return;
@@ -481,7 +483,7 @@ function focusMark() {
 /* --- checklist --- */
 function drawChecks() {
   const n = S.cur, ro = n.readonly || !!n.deleted;
-  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === S.tab));
+  document.querySelectorAll('.tabs button[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === S.tab));
   const box = $('checkList'); box.replaceChildren();
   n.items.forEach((it, i) => {
     if ((S.tab === 'need' && it.done) || (S.tab === 'done' && !it.done)) return;
@@ -601,12 +603,13 @@ function setupCanvas() {
   const pt = e => { const r = c.getBoundingClientRect(); return [(e.clientX - r.left) / c.width, (e.clientY - r.top) / c.width]; };
   c.onpointerdown = e => { if (ro) return; c.setPointerCapture(e.pointerId); cur = { c: pen.eraser ? '#ffffff' : pen.color, w: pen.size, p: [pt(e)] }; n.strokes.push(cur); strokePath(c.getContext('2d'), cur); };
   c.onpointermove = e => { if (!cur) return; cur.p.push(pt(e)); redraw(); };
-  c.onpointerup = c.onpointercancel = () => { if (cur) { cur = null; touch(); } };
+  c.onpointerup = c.onpointercancel = () => { if (cur) { cur = null; H.u.push({ t: 'add' }); H.r = []; touch(); } };
   updateDrawStatus();
 }
 function updateDrawStatus() {
   $('drawStatus').innerHTML = '';
-  $('drawStatus').append(el('span', { textContent: S.cur ? S.cur.title : '' }), el('span', {}, pen.eraser ? 'Borrador' : 'Lápiz', el('span', { className: 'dot', style: `background:${pen.eraser ? '#fff' : pen.color}` })));
+  const ub = (n, f) => el('button', { className: 'ib sm', innerHTML: ic(n), onclick: f });
+  $('drawStatus').append(el('span', {}, ub('undo', () => undo()), ub('redo', () => redo()), ' ', S.cur ? S.cur.title : ''), el('span', {}, pen.eraser ? 'Borrador' : 'Lápiz', el('span', { className: 'dot', style: `background:${pen.eraser ? '#fff' : pen.color}` })));
 }
 async function penDialog() {
   const cw = el('div', { className: 'colors' }, PEN_COLORS.map(c => { const b = el('button', { className: !pen.eraser && pen.color === c ? 'on' : '', onclick: () => { pen.color = c; pen.eraser = false; done(); } }); b.style.background = c; return b; }));
@@ -651,10 +654,14 @@ function openHref(h) { if (/^(mailto|tel):/i.test(h)) location.href = h; else wi
 let pendingSize = 0;
 function onRichInput() {
   const r = $('edText'), n = S.cur; if (!n) return;
-  fixSizeTags(r); autolink(r);
+  fixSizeTags(r); autolink(r); syncFromEditor();
+  touch();
+}
+function syncFromEditor() {
+  const r = $('edText'), n = S.cur; if (!n) return;
   n.body = r.innerText.replace(/ /g, ' ');
   n.html = n.body.trim() ? r.innerHTML : '';
-  touch(); $('edTitle').textContent = noteTitle(n);
+  $('edTitle').textContent = noteTitle(n);
 }
 // execCommand('fontSize') crea <font size=7>; lo convertimos en un <span> con el tamaño exacto en px.
 function fixSizeTags(root) {
@@ -751,8 +758,8 @@ function restoreSel() {
   if (savedRange) { const sel = getSelection(); sel.removeAllRanges(); sel.addRange(savedRange); }
 }
 function fmt(cmd, val, css = true) {
-  restoreSel(); document.execCommand('styleWithCSS', false, css); document.execCommand(cmd, false, val || null);
-  onRichInput(); updateFmtState();
+  histCommit(); restoreSel(); document.execCommand('styleWithCSS', false, css); document.execCommand(cmd, false, val || null);
+  onRichInput(); histCommit(); updateFmtState();
 }
 function selStyle() {
   let n = savedRange ? savedRange.startContainer : null; if (!n) return null;
@@ -779,7 +786,7 @@ function colorPick(title, cmd, withNone) {
 }
 function setSize(px) {
   pendingSize = px; restoreSel();
-  document.execCommand('styleWithCSS', false, false); document.execCommand('fontSize', false, '7'); onRichInput(); updateFmtState();
+  histCommit(); document.execCommand('styleWithCSS', false, false); document.execCommand('fontSize', false, '7'); onRichInput(); histCommit(); updateFmtState();
 }
 function stepSize(d) {
   const cur = curSize(); let i = SIZES.findIndex(s => s >= cur); if (i < 0) i = SIZES.length - 1;
@@ -813,6 +820,7 @@ function applyPainter() {
 const fontMenu = () => menu(FONTS.map(([l, f]) => ({ t: l, fn: () => fmt('fontName', f) })));
 const sizeMenu = () => menu(SIZES.map(s => ({ t: s + ' px', fn: () => setSize(s) })));
 const BTN = {
+  undo: { l: ic('undo'), fn: () => undo() }, redo: { l: ic('redo'), fn: () => redo() },
   bold: { l: 'N', fn: () => fmt('bold'), cmd: 'bold', st: 'font-weight:800' },
   italic: { l: 'K', fn: () => fmt('italic'), cmd: 'italic', st: 'font-style:italic' },
   underline: { l: 'S', fn: () => fmt('underline'), cmd: 'underline', st: 'text-decoration:underline' },
@@ -840,7 +848,7 @@ function fillBar(box, keys) {
 }
 function buildFmtBar() {
   const bar = $('fmtBar'); bar.replaceChildren();
-  fillBar(bar, ['bold', 'italic', 'underline', 'strike', 'font', 'size', 'grow', 'shrink', 'color', 'hilite', 'ul', 'ol', 'align', 'head', 'link', 'painter', 'sup', 'sub', 'clear']);
+  fillBar(bar, ['undo', 'redo', 'bold', 'italic', 'underline', 'strike', 'font', 'size', 'grow', 'shrink', 'color', 'hilite', 'ul', 'ol', 'align', 'head', 'link', 'painter', 'sup', 'sub', 'clear']);
   const mini = $('miniBar'); mini.replaceChildren();
   const r1 = el('div', { className: 'r' }), r2 = el('div', { className: 'r' });
   fillBar(r1, ['font', 'size', 'grow', 'shrink', 'clear', 'painter']); fillBar(r2, ['bold', 'italic', 'underline', 'hilite', 'color', 'ul', 'ol', 'link']);
@@ -864,10 +872,10 @@ function updateMini() {
 function editorMenu() {
   const n = S.cur, t = n.type;
   menu([
+    { t: 'Deshacer  (Ctrl+Z)', fn: undo }, { t: 'Rehacer  (Ctrl+Y)', fn: redo }, '-',
     t !== 'text' ? { t: 'Renombrar', fn: async () => { const v = await ask('Título', n.title); if (v !== null) { n.title = v; touch(); drawEditor(); } } } : null,
     t === 'draw' ? { t: 'Lápiz y colores…', fn: penDialog } : null,
-    t === 'draw' ? { t: 'Deshacer trazo', fn: () => { n.strokes.pop(); S.redraw(); touch(); } } : null,
-    t === 'draw' ? { t: 'Borrar dibujo', fn: async () => { if (await confirmD('¿Borrar todo el dibujo?')) { n.strokes = []; S.redraw(); touch(); } } } : null,
+    t === 'draw' ? { t: 'Borrar dibujo', fn: async () => { if (await confirmD('¿Borrar todo el dibujo?')) { H.u.push({ t: 'clear', s: n.strokes }); H.r = []; n.strokes = []; S.redraw(); touch(); } } } : null,
     t === 'check' || t === 'text' ? { t: t === 'text' ? 'Convertir en lista de tareas' : 'Convertir en nota de texto', fn: convertNote } : null,
     t !== 'draw' && t !== 'voice' ? { t: 'Buscar en la nota', fn: openFind } : null,
     { t: 'Información', fn: noteInfo },
@@ -890,7 +898,7 @@ function convertNote() {
   } else {
     n.body = n.items.map(i => (i.done ? '[x] ' : '') + i.t).join('\n'); n.html = ''; n.items = []; n.type = 'text'; n.title = '';
   }
-  touch(); drawEditor();
+  drawEditor(); histReset(); touch();
 }
 function openFind() {
   S.find = { q: '', i: 0, marks: [] }; drawEditor(); $('findInput').value = ''; $('findInput').focus();
@@ -961,12 +969,20 @@ function renderSettings() {
   sec('Apariencia');
   item('Tema', settings.theme === 'dark' ? 'Oscuro' : 'Claro', () => { settings.theme = settings.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = settings.theme; renderSettings(); });
   item('Enlaces wiki (PalabrasWiki y [[Nota]])', settings.wiki ? 'Activados' : 'Desactivados', () => { settings.wiki = !settings.wiki; renderSettings(); });
+  sec('Copias de seguridad automáticas');
+  item('Copia automática', bk.on ? 'Activada' : 'Desactivada', () => { pref('bk_on', bk.on ? '0' : '1'); renderSettings(); });
+  item('Frecuencia', bk.days === 1 ? 'Cada día' : `Cada ${bk.days} días`, () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref('bk_days', String(d)); renderSettings(); } }))));
+  item('Copias que se conservan', String(bk.keep), () => menu([3, 7, 14, 30].map(k => ({ t: k + ' copias', fn: () => { pref('bk_keep', String(k)); renderSettings(); } }))));
+  item('Hacer una copia ahora', pref('bk_last') ? 'Última: ' + fmtDate(+pref('bk_last')) : 'Aún no hay copias', async () => { await runBackup(true); renderSettings(); });
+  item('Ver y restaurar copias', 'Se guardan dentro de la app, en este dispositivo', backupsMenu);
+  if (dirSupported()) item('Carpeta de copias en el PC', 'Además guarda un archivo .json en una carpeta que elijas', chooseBackupFolder);
   sec('Datos');
   item('Exportar copia de seguridad', 'Archivo JSON con todas las notas, fotos, audios y carpetas', exportBackup);
   item('Importar copia de seguridad', 'Fusiona; si hay conflicto gana la nota más reciente', () => pickFile('application/json', false, importBackup));
   item('Importar archivos de texto (.txt)', 'Uno o varios; cada archivo crea una nota', () => pickFile('.txt,text/plain', true, importTxt));
   item('Vaciar papelera', '', emptyTrash);
   sec('Sincronización');
+  item('Sincronización automática', pref('autosync') !== '0' ? 'Activada: al abrir la app y al volver a ella' : 'Desactivada: solo con el botón', () => { pref('autosync', pref('autosync') !== '0' ? '0' : '1'); renderSettings(); });
   item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
   item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
@@ -982,19 +998,26 @@ function exportBackup() {
   const data = { app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes };
   download(`notas-copia-${new Date().toISOString().slice(0, 10)}.json`, new Blob([JSON.stringify(data, (k, v) => (k[0] === '_' ? undefined : v))], { type: 'application/json' }));
 }
+// overwrite=true: restaurar (la copia manda); false: fusionar (gana la más reciente)
+async function applyBackupData(d, overwrite) {
+  if (!d || !Array.isArray(d.notes)) throw new Error('copia no válida');
+  let add = 0, upd = 0; const t = tombs();
+  for (const f of d.folders || []) if (f.id && !folderById(f.id)) { S.folders.push(f); await DB.put('folders', f); }
+  for (const raw of d.notes) {
+    if (!raw || !raw.id) continue;
+    const n = Object.assign(newNote(raw.type || 'text'), raw), old = S.notes.find(x => x.id === n.id);
+    if (!overwrite && old && old.updated >= n.updated) continue;
+    if (overwrite) { n.updated = Date.now(); delete t['n:' + n.id]; }   // para que la sincronización propague la restauración
+    if (old) { S.notes[S.notes.indexOf(old)] = n; upd++; } else { S.notes.push(n); add++; }
+    await DB.put('notes', n);
+  }
+  saveTombs(t);
+  return { add, upd };
+}
 async function importBackup([file]) {
   try {
-    const d = JSON.parse(await file.text()); if (!Array.isArray(d.notes)) throw 0;
-    let add = 0, upd = 0;
-    for (const f of d.folders || []) if (f.id && !folderById(f.id)) { S.folders.push(f); await DB.put('folders', f); }
-    for (const raw of d.notes) {
-      if (!raw || !raw.id) continue;
-      const n = Object.assign(newNote(raw.type || 'text'), raw), old = S.notes.find(x => x.id === n.id);
-      if (old && old.updated >= n.updated) continue;
-      if (old) { S.notes[S.notes.indexOf(old)] = n; upd++; } else { S.notes.push(n); add++; }
-      await DB.put('notes', n);
-    }
-    toast(`Importadas: ${add} nuevas, ${upd} actualizadas`);
+    const r = await applyBackupData(JSON.parse(await file.text()), false);
+    toast(`Importadas: ${r.add} nuevas, ${r.upd} actualizadas`);
   } catch (e) { toast('Archivo de copia no válido'); }
 }
 async function importTxt(files) {
@@ -1128,7 +1151,7 @@ function armFirstTap() {
   if (tapArmed) return; tapArmed = true;
   document.addEventListener('pointerup', () => { tapArmed = false; syncDrive({ auto: true }); }, { once: true });
 }
-const autoSyncDue = () => pref('gclient') && pref('gconsent') && Date.now() - (+pref('lastSync') || 0) > 3 * 60000;
+const autoSyncDue = () => pref('autosync') !== '0' && pref('gclient') && pref('gconsent') && Date.now() - (+pref('lastSync') || 0) > 3 * 60000;
 async function setClientId(first) {
   const v = await ask(first ? 'Para sincronizar pega tu ID de cliente de Google (termina en .apps.googleusercontent.com)' : 'ID de cliente de Google', pref('gclient') || '');
   if (v === null) return;
@@ -1143,6 +1166,132 @@ async function setClientId(first) {
 function googleSignOut() {
   if (gToken && window.google && google.accounts) google.accounts.oauth2.revoke(gToken, () => {});
   gToken = null; pref('gconsent', ''); toast('Sesión de Google cerrada');
+}
+
+/* ============ Deshacer / Rehacer (varios pasos) ============ */
+// Texto y listas: instantáneas del contenido (hasta 200 pasos). Dibujo: acciones (trazo / borrado).
+const H = { u: [], r: [], base: null, timer: 0 };
+function caretOffset() {
+  const r = $('edText'), sel = getSelection();
+  if (!sel.rangeCount || !r.contains(sel.anchorNode)) return null;
+  const pre = document.createRange(); pre.selectNodeContents(r); pre.setEnd(sel.anchorNode, sel.anchorOffset); return pre.toString().length;
+}
+function setCaretOffset(r, off) {
+  if (off == null) return;
+  const w = document.createTreeWalker(r, NodeFilter.SHOW_TEXT); let n, acc = 0;
+  while ((n = w.nextNode())) {
+    if (acc + n.data.length >= off) { const g = document.createRange(); g.setStart(n, off - acc); g.collapse(true); const s = getSelection(); s.removeAllRanges(); s.addRange(g); return; }
+    acc += n.data.length;
+  }
+}
+function snapNow() {
+  const n = S.cur; if (!n || n.type === 'draw') return null;
+  if (n.type === 'check') return { k: JSON.stringify(n.items) };
+  return { k: $('edText').innerHTML, c: caretOffset() };
+}
+function histReset() { clearTimeout(H.timer); H.u = []; H.r = []; H.base = snapNow(); }
+function histNote() { if (!S.cur || S.cur.type === 'draw') return; clearTimeout(H.timer); H.timer = setTimeout(histCommit, 450); }
+function histCommit() {
+  clearTimeout(H.timer); const s = snapNow();
+  if (!s || !H.base || s.k === H.base.k) return;
+  H.u.push(H.base); if (H.u.length > 200) H.u.shift();
+  H.base = s; H.r = [];
+}
+function applySnap(s) {
+  const n = S.cur;
+  if (n.type === 'check') { n.items = JSON.parse(s.k); drawChecks(); }
+  else { const r = $('edText'); r.innerHTML = s.k; r.focus(); setCaretOffset(r, s.c); syncFromEditor(); }
+  touch();
+}
+function undo() {
+  const n = S.cur; if (!n || n.readonly || n.deleted) return;
+  if (n.type === 'draw') {
+    const a = H.u.pop(); if (!a) { toast('Nada que deshacer'); return; }
+    if (a.t === 'add') H.r.push({ t: 'add', s: n.strokes.pop() }); else { H.r.push({ t: 'clear' }); n.strokes = a.s; }
+    S.redraw(); touch(); return;
+  }
+  histCommit(); const prev = H.u.pop(); if (!prev) { toast('Nada que deshacer'); return; }
+  H.r.push(H.base); H.base = prev; applySnap(prev);
+}
+function redo() {
+  const n = S.cur; if (!n || n.readonly || n.deleted) return;
+  if (n.type === 'draw') {
+    const a = H.r.pop(); if (!a) { toast('Nada que rehacer'); return; }
+    if (a.t === 'add') { n.strokes.push(a.s); H.u.push({ t: 'add' }); } else { H.u.push({ t: 'clear', s: n.strokes }); n.strokes = []; }
+    S.redraw(); touch(); return;
+  }
+  histCommit(); const nx = H.r.pop(); if (!nx) { toast('Nada que rehacer'); return; }
+  H.u.push(H.base); H.base = nx; applySnap(nx);
+}
+function histKeys(e) {
+  if (S.stack[S.stack.length - 1] !== 'editor' || !$('overlay').hidden || !(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase(); if (k !== 'z' && k !== 'y') return;
+  e.preventDefault(); (k === 'y' || e.shiftKey) ? redo() : undo();
+}
+
+/* ============ Copias de seguridad automáticas ============ */
+const bk = {
+  get on() { return pref('bk_on') !== '0' }, get days() { return +pref('bk_days') || 1 }, get keep() { return +pref('bk_keep') || 7 },
+};
+const dirSupported = () => 'showDirectoryPicker' in window;
+const pad2 = n => String(n).padStart(2, '0');
+const stamp = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}-${pad2(d.getMinutes())}`;
+const backupJSON = () => JSON.stringify({ app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes.map(strip), tomb: tombs() }, (k, v) => (k[0] === '_' ? undefined : v));
+async function gzip(text) { const st = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip')); return new Response(st).blob(); }
+async function gunzipText(blob) { const st = blob.stream().pipeThrough(new DecompressionStream('gzip')); return new Response(st).text(); }
+
+async function runBackup(force) {
+  if (!DB.idb) { if (force) toast('Este navegador no permite guardar copias internas'); return; }
+  const due = bk.on && Date.now() - (+pref('bk_last') || 0) >= bk.days * 864e5 - 36e5;
+  if (!force && (!due || !S.notes.length)) return;
+  const json = backupJSON(), ts = Date.now(), name = `notas-copia-${stamp(new Date(ts))}.json`;
+  let blob = new Blob([json], { type: 'application/json' }), gz = false;
+  if (window.CompressionStream) { try { blob = await gzip(json); gz = true; } catch (e) {} }
+  await DB.put('backups', { id: String(ts), ts, name, size: blob.size, count: S.notes.length, gz, blob });
+  pref('bk_last', String(ts));
+  const all = (await DB.all('backups')).sort((a, b) => b.ts - a.ts);
+  for (const old of all.slice(bk.keep)) await DB.del('backups', old.id);
+  await folderWrite(name, json, false);
+  if (force) toast('Copia de seguridad creada');
+}
+// Carpeta del PC (Chrome/Edge de escritorio): requiere permiso del usuario, que se renueva con un toque.
+let folderPending = null;
+async function folderHandle() { try { const r = (await DB.all('meta')).find(x => x.id === 'bkdir'); return r && r.handle; } catch (e) { return null; } }
+async function folderWrite(name, json, interactive) {
+  const dir = await folderHandle(); if (!dir) return;
+  try {
+    let perm = await dir.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted' && interactive) perm = await dir.requestPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') { folderPending = { name, json }; armFolderTap(); return; }
+    const fh = await dir.getFileHandle(name, { create: true }), w = await fh.createWritable(); await w.write(json); await w.close();
+    const names = []; for await (const [n, h] of dir.entries()) if (h.kind === 'file' && /^notas-copia-.*\.json$/.test(n)) names.push(n);
+    names.sort().reverse(); for (const n of names.slice(bk.keep)) await dir.removeEntry(n);
+    folderPending = null;
+  } catch (e) { toast('No se pudo escribir en la carpeta de copias'); }
+}
+let folderTapArmed = false;
+function armFolderTap() {
+  if (folderTapArmed) return; folderTapArmed = true;
+  document.addEventListener('pointerup', async () => { folderTapArmed = false; if (folderPending) await folderWrite(folderPending.name, folderPending.json, true); }, { once: true });
+}
+async function chooseBackupFolder() {
+  try {
+    const handle = await showDirectoryPicker({ mode: 'readwrite', id: 'notas-backups' });
+    await DB.put('meta', { id: 'bkdir', handle }); toast('Carpeta elegida: ' + handle.name); await runBackup(true);
+  } catch (e) { if (e.name !== 'AbortError') toast('No se pudo elegir la carpeta'); }
+}
+async function backupText(b) { return b.gz ? gunzipText(b.blob) : b.blob.text(); }
+async function backupsMenu() {
+  const all = (await DB.all('backups')).sort((a, b) => b.ts - a.ts);
+  if (!all.length) { toast('Aún no hay copias guardadas'); return; }
+  menu(all.map(b => ({ t: `${fmtDate(b.ts)} · ${b.count} notas · ${Math.max(1, Math.round(b.size / 1024))} KB`, fn: () => menu([
+    { t: 'Restaurar esta copia', fn: async () => {
+      if (!(await confirmD('Las notas de esta copia sustituirán a las actuales que tengan el mismo identificador. Las notas nuevas que no estén en la copia se conservan. ¿Continuar?'))) return;
+      await applyBackupData(JSON.parse(await backupText(b)), true); renderMain(); toast('Copia restaurada');
+    } },
+    { t: 'Descargar archivo', fn: async () => download(b.name, new Blob([await backupText(b)], { type: 'application/json' })) },
+    { t: 'Eliminar esta copia', fn: async () => { await DB.del('backups', b.id); toast('Copia eliminada'); } },
+  ]) })));
 }
 
 /* ============ Arranque ============ */
@@ -1168,6 +1317,9 @@ function wire() {
   };
   $('edText').oninput = onRichInput;
   $('edText').addEventListener('paste', onRichPaste);
+  $('edText').addEventListener('beforeinput', e => { if (e.inputType === 'historyUndo') { e.preventDefault(); undo(); } else if (e.inputType === 'historyRedo') { e.preventDefault(); redo(); } });
+  document.addEventListener('keydown', histKeys);
+  $('ckUndo').onclick = () => undo(); $('ckRedo').onclick = () => redo();
   $('edText').addEventListener('click', e => { const a = e.target.closest && e.target.closest('a'); if (a && $('edText').contains(a)) { e.preventDefault(); linkMenu(a); } });
   $('edBody').addEventListener('scroll', () => requestAnimationFrame(updateMini));
   document.addEventListener('selectionchange', onSelChange);
@@ -1181,7 +1333,7 @@ function wire() {
   };
   for (const ev of ['click', 'keyup']) $('edText').addEventListener(ev, caretLink);
   $('edText').addEventListener('blur', () => setTimeout(() => $('linkBtn').hidden = true, 250));
-  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; drawChecks(); });
+  document.querySelectorAll('.tabs button[data-t]').forEach(b => b.onclick = () => { S.tab = b.dataset.t; drawChecks(); });
   $('addInput').onkeydown = e => { if (e.key === 'Enter') addCheckItem(); };
   $('addItem').onclick = () => addCheckItem(); $('addMic').onclick = dictate;
   $('findInput').oninput = e => {
@@ -1195,7 +1347,7 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) flush().catch(() => {}); else { checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flush().catch(() => {}); else { checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
   addEventListener('pagehide', () => flush().catch(() => {}));
 }
 
@@ -1221,6 +1373,7 @@ async function init() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
   checkReminders(); setInterval(checkReminders, 30000);
-  if (pref('gclient') && pref('gconsent')) syncDrive({ auto: true });   // sincroniza al abrir la app
+  if (pref('autosync') !== '0' && pref('gclient') && pref('gconsent')) syncDrive({ auto: true });
+  runBackup(false).catch(() => {});   // sincroniza al abrir la app
 }
 init();
