@@ -783,7 +783,6 @@ function onSelChange() {
   const r = $('edText'), sel = getSelection();
   if (sel.rangeCount && r.contains(sel.anchorNode)) {
     savedRange = sel.getRangeAt(0).cloneRange(); updateFmtState();
-    if (painter && !sel.isCollapsed) { clearTimeout(painter.t); painter.t = setTimeout(applyPainter, 700); }
   }
   cancelAnimationFrame(miniRaf); miniRaf = requestAnimationFrame(updateMini);
 }
@@ -830,13 +829,16 @@ function stepSize(d) {
 
 // --- copiar formato (como en Word) ---
 function togglePainter() {
-  if (painter) { clearTimeout(painter.t); painter = null; paintBtns(); toast('Copiar formato cancelado'); return; }
+  if (painter) {
+    if (savedRange && !savedRange.collapsed) { applyPainter(); return; }   // con texto seleccionado: aplicar
+    painter = null; paintBtns(); toast('Copiar formato cancelado'); return;
+  }
   const cs = selStyle(); if (!cs) { toast('Coloca el cursor en el texto cuyo formato quieres copiar'); return; }
   let bg = 'transparent', n = savedRange.startContainer; if (n.nodeType === 3) n = n.parentElement;
   for (; n && n !== $('edText'); n = n.parentElement) { const b = getComputedStyle(n).backgroundColor; if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') { bg = b; break; } }
   const deco = cs.textDecorationLine || '';
   painter = { t: 0, f: { bold: parseInt(cs.fontWeight) >= 600, italic: cs.fontStyle === 'italic', underline: deco.includes('underline'), strike: deco.includes('line-through'), color: cs.color, bg, family: cs.fontFamily, size: Math.round(parseFloat(cs.fontSize)) } };
-  paintBtns(); toast('Formato copiado. Ahora selecciona el texto al que quieres aplicarlo');
+  paintBtns(); toast('Formato copiado. Selecciona el texto y toca de nuevo el lápiz para aplicarlo');
 }
 function paintBtns() { document.querySelectorAll('[data-role=painter]').forEach(b => b.classList.toggle('on', !!painter)); }
 function applyPainter() {
