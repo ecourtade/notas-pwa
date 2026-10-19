@@ -2,7 +2,9 @@
 
 PWA de notas tipo Note Everything (HTML/CSS/JS sin compilación). App publicada en GitHub Pages desde este repo.
 
-**Antes de trabajar lee `docs/MEMORIA.md`** (repo privado `notas-enplus-docs`, clonado en `docs/`; si falta: `git clone https://github.com/ecourtade/notas-enplus-docs.git docs`).
+**Para retomar rápido lee solo `docs/CONTINUAR.md`** (estado, pendientes, comandos y trampas; es corto). Abre `docs/MEMORIA.md` solo si necesitas el detalle de una zona, y no leas `app.js` entero (usa `grep`).
+
+**Antes de trabajar a fondo lee `docs/MEMORIA.md`** (repo privado `notas-enplus-docs`, clonado en `docs/`; si falta: `git clone https://github.com/ecourtade/notas-enplus-docs.git docs`).
 Al terminar un cambio, actualiza `docs/CHANGELOG.md` y la sección afectada de `docs/MEMORIA.md`, y haz commit y push en ambos repos.
 
 ## Reglas del proyecto
