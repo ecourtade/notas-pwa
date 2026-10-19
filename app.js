@@ -1012,7 +1012,7 @@ function renderSettings() {
   item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
   item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
-  item('Registro de sincronización', 'Últimas operaciones (para diagnosticar problemas)', () => { let l = []; try { l = JSON.parse(pref('synclog') || '[]'); } catch (e) {} info('Registro de sincronización', l.length ? l.slice().reverse().map(e => fmtDate(e.t) + ' — ' + (e.blocked ? 'DETENIDO: pedía borrar ' + e.blocked : `↓${e.down} ↑${e.up} borradas:${e.del} total:${e.total}`)).join('\n') : 'Sin registros todavía'); });
+  item('Registro de sincronización', 'Últimas operaciones (para diagnosticar problemas)', () => { let l = []; try { l = JSON.parse(pref('synclog') || '[]'); } catch (e) {} info('Registro de sincronización', l.length ? l.slice().reverse().map(e => fmtDate(e.t) + ' — ' + (e.blocked ? 'DETENIDO: pedía borrar ' + e.blocked : e.drop ? `FALTABAN ${e.drop} notas al abrir (${e.prev} → ${e.now})` : `↓${e.down} ↑${e.up} borradas:${e.del} total:${e.total}`)).join('\n') : 'Sin registros todavía'); });
   item('Cerrar sesión de Google', '', googleSignOut);
   sec('Acerca de');
   item('Notas', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
@@ -1133,6 +1133,7 @@ async function gfetch(url, opts = {}) {
 const strip = n => { const o = {}; for (const k in n) if (k[0] !== '_') o[k] = n[k]; return o; };
 
 let syncing = false;
+function markCount() { pref('boot_count', String(S.notes.length)); }
 function syncLog(e) { try { const l = JSON.parse(pref('synclog') || '[]'); l.push(Object.assign({ t: Date.now() }, e)); pref('synclog', JSON.stringify(l.slice(-25))); } catch (x) {} }
 async function syncDrive(opts) {
   const auto = !!(opts && opts.auto);                 // arranque automático: sin avisos molestos
@@ -1653,8 +1654,8 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
-  addEventListener('pagehide', () => flush().catch(() => {}));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
+  addEventListener('pagehide', () => { flush().catch(() => {}); if (!window.__dropPending) markCount(); });
 }
 
 async function init() {
@@ -1673,6 +1674,14 @@ async function init() {
     const lim = Date.now() - TRASH_DAYS * 864e5;
     for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await forgetNote(n.id);
     S.notes = S.notes.filter(n => !n.deleted || n.deleted >= lim);
+    const prevCount = +pref('boot_count') || 0, nowCount = S.notes.length;
+    if (prevCount - nowCount >= 10) {
+      syncLog({ drop: prevCount - nowCount, prev: prevCount, now: nowCount }); window.__dropPending = true;
+      setTimeout(async () => {
+        const r = await dialog('Faltan notas', el('p', { textContent: `Hay ${prevCount - nowCount} notas menos que la última vez que cerraste la app (antes ${prevCount}, ahora ${nowCount}).\n\nPuede que el navegador haya borrado datos o que alguna operación las haya quitado. Tus notas pueden estar en una copia de seguridad, en Google Drive o en el ZIP original.\n\nPulsa "Ver copias" para restaurar una copia interna.` }), [{ t: 'Cerrar', v: 0 }, { t: 'Ver copias', v: 1 }]);
+        window.__dropPending = false; markCount(); if (r === 1) backupsMenu();
+      }, 800);
+    } else markCount();
   } catch (e) { toast('Error al abrir el almacenamiento: ' + e.message); }
   renderMain();
   // texto recibido desde otras apps (share target)

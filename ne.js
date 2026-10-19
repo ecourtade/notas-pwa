@@ -99,6 +99,7 @@ async function neImport([file]) {
       await persist(n);
     }
     for (const f of NE._newFolders) await DB.put('folders', f);
+    try { await runBackup(true, true); markCount(); } catch (e) {}    // red de seguridad: copia justo tras importar
     renderMain();
     await info('Importación terminada', `Nuevas: ${res.add}\nActualizadas: ${res.upd}\nYa estaban al día: ${res.same}\nCarpetas creadas: ${NE._newFolders.length}\n\nOmitidas: ${res.enc} cifradas, ${res.bin} binarias${withTrash ? '' : ', ' + res.trash + ' de la papelera'}.\nSin multimedia: ${res.nomedia}. Tipo no soportado (vídeo/galería): ${res.unsup}.`);
   } catch (e) { console.error(e); toast('No se pudo importar: ' + e.message); }
