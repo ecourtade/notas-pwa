@@ -1011,7 +1011,7 @@ function renderSettings() {
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
   item('Recuperación de contraseñas', recOn() ? 'Configurada · clave partida en correo + WhatsApp/SMS' : 'No configurada', recoveryMenu);
   sec('Protección de los datos');
-  item('Carpeta espejo en el PC (recomendado)', dirSupported() ? (mir.dir ? 'Activa: ' + mir.dir.name + ' — copia viva fuera del navegador' : 'No configurada: guarda cada nota como archivo en una carpeta del disco') : 'Solo en Chrome o Edge de PC', mirrorMenu);
+  item('Carpeta espejo (recomendado)', dirSupported() ? (mir.dir ? 'Activa: ' + mir.dir.name + ' — copia viva fuera del navegador' : 'No configurada: guarda cada nota como archivo en una carpeta de tu dispositivo') : 'Este navegador no permite elegir carpetas', mirrorMenu);
   const freq = (key, cur) => () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref(key, String(d)); renderSettings(); } })));
   const keepMenu = key => () => menu([3, 7, 14, 30].map(k => ({ t: k + ' copias', fn: () => { pref(key, String(k)); renderSettings(); } })));
   const label = d => d === 1 ? 'Cada día' : `Cada ${d} días`;
@@ -1029,9 +1029,9 @@ function renderSettings() {
   item('Copias que se conservan', bj.keep ? String(bj.keep) : 'Todas: no se borra ninguna automáticamente', () => menu([...[3, 7, 14, 30].map(k => ({ t: k + ' copias', fn: () => { pref('bj_keep', String(k)); renderSettings(); } })), { t: 'Todas (no borrar nunca)', fn: () => { pref('bj_keep', '0'); renderSettings(); } }]));
   item('Guardar en Google Drive', bj.drive ? 'Sí (carpeta privada de la app en tu Drive)' : 'No', () => { pref('bj_drive', bj.drive ? '0' : '1'); renderSettings(); });
   item('Guardar en el teléfono (carpeta Descargas)', bj.phone ? 'Sí · un archivo .json que la app nunca borra; solo tú, a mano' : 'No', () => { pref('bj_phone', bj.phone ? '0' : '1'); renderSettings(); if (bj.phone) toast('Si Chrome pregunta, permite las descargas de este sitio'); });
-  if (dirSupported()) item('Guardar en una carpeta del PC', bj.pc ? 'Sí · toca para elegir o cambiar la carpeta' : 'No · toca para elegir la carpeta', () => menu([
+  if (dirSupported()) item('Guardar en una carpeta del dispositivo', bj.pc ? 'Sí · toca para elegir o cambiar la carpeta' : 'No · toca para elegir la carpeta', () => menu([
     { t: 'Elegir o cambiar la carpeta', fn: async () => { await chooseBackupFolder(); renderSettings(); } },
-    { t: bj.pc ? 'No guardar en el PC' : 'Guardar también en el PC', fn: () => { pref('bj_pc', bj.pc ? '0' : '1'); renderSettings(); } },
+    { t: bj.pc ? 'No guardar en la carpeta' : 'Guardar también en la carpeta', fn: () => { pref('bj_pc', bj.pc ? '0' : '1'); renderSettings(); } },
   ]));
   item('Hacer una copia JSON ahora', pref('bj_last') ? 'Última: ' + fmtDate(+pref('bj_last')) : 'Aún no hay copias JSON', async () => { await runJsonBackup(true, false); renderSettings(); });
   item('Ver y restaurar copias de Drive', 'Copias JSON guardadas en tu Google Drive', driveBackupsMenu);
@@ -1334,21 +1334,16 @@ async function runBackup(force, silent) {
 let folderPending = null;
 async function folderHandle() { try { const r = (await DB.all('meta')).find(x => x.id === 'bkdir'); return r && r.handle; } catch (e) { return null; } }
 async function folderWrite(name, json, interactive) {
-  const dir = await folderHandle(); if (!dir) return;
+  const dir = await folderHandle(); if (!dir) return false;
   try {
     let perm = await dir.queryPermission({ mode: 'readwrite' });
     if (perm !== 'granted' && interactive) perm = await dir.requestPermission({ mode: 'readwrite' });
-    if (perm !== 'granted') { folderPending = { name, json }; armFolderTap(); return; }
+    if (perm !== 'granted') { folderPending = { name, json }; updateSyncStat(); return false; }   // se pide con el aviso de la pantalla principal
     const fh = await dir.getFileHandle(name, { create: true }), w = await fh.createWritable(); await w.write(json); await w.close();
     const names = []; for await (const [n, h] of dir.entries()) if (h.kind === 'file' && /^notas-copia-.*\.json$/.test(n)) names.push(n);
     names.sort().reverse(); if (bj.keep) for (const n of names.slice(bj.keep)) await dir.removeEntry(n);
-    folderPending = null;
-  } catch (e) { toast('No se pudo escribir en la carpeta de copias'); }
-}
-let folderTapArmed = false;
-function armFolderTap() {
-  if (folderTapArmed) return; folderTapArmed = true;
-  document.addEventListener('pointerup', async () => { folderTapArmed = false; if (folderPending) await folderWrite(folderPending.name, folderPending.json, true); }, { once: true });
+    folderPending = null; updateSyncStat(); return true;
+  } catch (e) { toast('No se pudo escribir en la carpeta de copias'); return false; }
 }
 async function chooseBackupFolder() {
   try {
@@ -1638,7 +1633,7 @@ function recoveryMenu() {
 // Cada nota se guarda además como un archivo .json en una carpeta real del disco (Chrome/Edge de escritorio).
 // Si el navegador borra sus datos, las notas siguen en esa carpeta y se restauran al elegirla de nuevo.
 // Los archivos guardan exactamente lo mismo que la base interna: las notas cifradas siguen cifradas.
-const mir = { dir: null, q: new Map(), timer: 0, tapArmed: false };
+const mir = { dir: null, q: new Map(), timer: 0, needPerm: false };
 const mirName = id => 'n_' + String(id).replace(/[^\w.-]+/g, '_') + '.json';
 async function mirInit() {
   if (!dirSupported()) return;
@@ -1663,7 +1658,8 @@ function mirHook(op, store, v) {
 for (const m of ['put', 'del']) { const orig = DB[m].bind(DB); DB[m] = async (...a) => { const r = await orig(...a); try { mirHook(m, ...a); } catch (e) {} return r; }; }
 async function mirFlush(interactive) {
   if (!mir.dir || !mir.q.size) return;
-  if (!(await mirPerm(interactive))) { armMirTap(); return; }
+  if (!(await mirPerm(interactive))) { mir.needPerm = true; updateSyncStat(); return; }
+  mir.needPerm = false;
   const sub = await mirSub(), ops = [...mir.q.values()]; mir.q.clear();
   for (const op of ops) {
     try {
@@ -1671,11 +1667,7 @@ async function mirFlush(interactive) {
       else await sub.removeEntry(op.name).catch(() => {});
     } catch (e) { mir.q.set(op.name, op); }
   }
-  if (mir.q.size) armMirTap();
-}
-function armMirTap() {
-  if (mir.tapArmed) return; mir.tapArmed = true;
-  document.addEventListener('pointerup', async () => { mir.tapArmed = false; await mirFlush(true); mirCheck(); }, { once: true });
+  if (mir.q.size) { mir.needPerm = true; updateSyncStat(); }
 }
 async function mirRead() {
   const sub = await mirSub(), notes = [], out = { notes, folders: [], recovery: null };
@@ -1725,7 +1717,7 @@ async function chooseMirrorFolder() {
   } catch (e) { if (e.name !== 'AbortError') toast('No se pudo elegir la carpeta'); }
 }
 function mirrorMenu() {
-  if (!dirSupported()) { info('Carpeta espejo', 'Esta función necesita Chrome o Edge en un ordenador. En Android, el navegador no permite guardar en carpetas: tus notas se protegen con la sincronización con Google Drive y las copias exportadas.'); return; }
+  if (!dirSupported()) { info('Carpeta espejo', 'Este navegador no permite elegir carpetas. Usa una versión reciente de Chrome o Edge. Mientras tanto, tus notas se protegen con la sincronización con Google Drive y las copias exportadas.'); return; }
   menu([
     { t: mir.dir ? 'Cambiar de carpeta' : 'Elegir la carpeta', fn: async () => { await chooseMirrorFolder(); renderSettings(); } },
     mir.dir ? { t: 'Restaurar desde la carpeta', fn: () => mirRestore(true) } : null,
@@ -1790,7 +1782,7 @@ async function runJsonBackup(force, auto) {
     let done = {}; try { done = JSON.parse(pref('bj_done') || '{}'); } catch (e) {}
     const save = () => pref('bj_done', JSON.stringify(done));
     let err = null;
-    if (dest.pc && !done.pc) { await folderWrite(name, json, false); if (!folderPending) { done.pc = true; save(); } }
+    if (dest.pc && !done.pc) { if (await folderWrite(name, json, false)) { done.pc = true; save(); } }
     if (dest.phone && !done.phone) {
       // Chrome solo permite descargar archivos tras un toque del usuario: si no lo hay, se hace con el próximo toque
       if (force || (navigator.userActivation && navigator.userActivation.isActive)) { download(name, new Blob([json], { type: 'application/json' })); done.phone = true; save(); }
@@ -1815,6 +1807,13 @@ async function runJsonBackup(force, auto) {
   } catch (e) { pref('bj_pending', '1'); if (force) toast('Copia JSON: ' + e.message); }
   finally { bjRunning = false; updateSyncStat(); }
 }
+function markBjDone(k) { try { const d = JSON.parse(pref('bj_done') || '{}'); d[k] = true; pref('bj_done', JSON.stringify(d)); } catch (e) {} }
+// Pide el permiso de las carpetas SOLO cuando el usuario toca el aviso (una vez por copia pendiente).
+async function grantFolders() {
+  if (folderPending) { const p = folderPending; if (await folderWrite(p.name, p.json, true)) markBjDone('pc'); }
+  if (mir.dir && (mir.needPerm || mir.q.size)) { await mirFlush(true); mirCheck(); }
+  updateSyncStat(); runJsonBackup(false, true);
+}
 function checkSchedules() { runBackup(false).catch(() => {}); runJsonBackup(false, true).catch(() => {}); }
 
 async function driveBackupsMenu() {
@@ -1837,7 +1836,8 @@ function updateSyncStat() {
   const e = $('syncBar'); if (!e) return;
   const last = +pref('lastSync') || 0, err = pref('lastSyncErr');
   let t, cls = '';
-  if (!pref('gclient')) t = '☁ Sincronización no configurada (toca para configurarla)';
+  if (folderPending || (mir.dir && mir.needPerm)) { t = '🔒 Toca aquí para permitir que la app guarde en tu carpeta (Chrome lo pide en cada sesión)'; cls = 'warn'; }
+  else if (!pref('gclient')) t = '☁ Sincronización no configurada (toca para configurarla)';
   else if (syncing) t = '☁ Sincronizando…';
   else if (err) { t = '⚠ La última sincronización falló' + (last ? ' · última correcta: ' + fmtDate(last) : ''); cls = 'warn'; }
   else if (!navigator.onLine && S.dirty) { t = '⏳ Sin conexión: se sincronizará al volver' + (last ? ' · última: ' + fmtDate(last) : ''); cls = 'warn'; }
@@ -2016,7 +2016,7 @@ function renderFilterBar() {
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
-  $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu; $('syncBtn').onclick = syncDrive; $('syncBar').onclick = () => syncDrive();
+  $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu; $('syncBtn').onclick = syncDrive; $('syncBar').onclick = () => ((folderPending || (mir.dir && mir.needPerm)) ? grantFolders() : syncDrive());
   $('folderBtn').onclick = () => pickFolder();
   $('searchBtn').onclick = () => { const b = $('searchBar'); b.hidden = !b.hidden; if (b.hidden) { S.q = ''; $('searchInput').value = ''; renderMain(); } else $('searchInput').focus(); };
   $('searchInput').oninput = e => { S.q = e.target.value; renderMain(); };
