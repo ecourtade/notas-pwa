@@ -126,7 +126,8 @@ async function deriveKey(pw, salt) {
 async function encPayload(n) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, n._key, new TextEncoder().encode(JSON.stringify({ body: n.body, html: n.html, items: n.items })));
-  return { s: n.enc.s, iv: b64(iv), d: b64(ct) };
+  const rk = await recoveryWrap(n);
+  return Object.assign({ s: n.enc.s, iv: b64(iv), d: b64(ct) }, rk ? { rk } : {});
 }
 async function decryptWith(n, key) {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(n.enc.iv) }, key, unb64(n.enc.d));
@@ -138,9 +139,13 @@ async function unlock(n) {
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS'); return false; }
   if (await bioUnlock(n)) return true;                      // huella, si está activada para esta nota
   for (;;) {
-    const pw = await ask('Contraseña de la nota', '', 'password');
-    if (pw === null) return false;
-    try { await decryptWith(n, await deriveKey(pw, unb64(n.enc.s))); setTimeout(() => offerBio(n), 500); return true; }
+    const inp = el('input', { type: 'password' });
+    const btns = [{ t: 'Cancelar', v: null }]; if (recOn() && n.enc.rk) btns.push({ t: 'Olvidé la contraseña', v: 'forgot' }); btns.push({ t: 'Aceptar', v: true });
+    const dp = dialog('Contraseña de la nota', inp, btns);
+    setTimeout(() => inp.focus(), 50); inp.onkeydown = e => { if (e.key === 'Enter') $('overlay').querySelector('.btns button:last-child').click(); };
+    const r = await dp; if (r === null) return false;
+    if (r === 'forgot') { if (await recoverNote(n)) return true; continue; }
+    try { await decryptWith(n, await deriveKey(inp.value, unb64(n.enc.s))); setTimeout(() => offerBio(n), 500); return true; }
     catch (e) { toast('Contraseña incorrecta'); }
   }
 }
@@ -984,6 +989,7 @@ function renderSettings() {
   sec('Seguridad');
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
+  item('Recuperación de contraseñas', recOn() ? 'Configurada · clave partida en correo + WhatsApp/SMS' : 'No configurada', recoveryMenu);
   sec('Copias de seguridad automáticas');
   item('Copia automática', bk.on ? 'Activada' : 'Desactivada', () => { pref('bk_on', bk.on ? '0' : '1'); renderSettings(); });
   item('Frecuencia', bk.days === 1 ? 'Cada día' : `Cada ${bk.days} días`, () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref('bk_days', String(d)); renderSettings(); } }))));
@@ -1012,13 +1018,14 @@ function pickFile(accept, multiple, fn) {
   f.onchange = () => { const files = [...f.files]; f.value = ''; if (files.length) fn(files); }; f.click();
 }
 function exportBackup() {
-  const data = { app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes };
+  const data = { app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes, recovery: S.recovery || undefined };
   download(`notas-copia-${new Date().toISOString().slice(0, 10)}.json`, new Blob([JSON.stringify(data, (k, v) => (k[0] === '_' ? undefined : v))], { type: 'application/json' }));
 }
 // overwrite=true: restaurar (la copia manda); false: fusionar (gana la más reciente)
 async function applyBackupData(d, overwrite) {
   if (!d || !Array.isArray(d.notes)) throw new Error('copia no válida');
   let add = 0, upd = 0; const t = tombs();
+  if (d.recovery) { const pk = pickRecovery(S.recovery, d.recovery); if (pk !== S.recovery) await setRecovery(pk); }
   for (const f of d.folders || []) if (f.id && !folderById(f.id)) { S.folders.push(f); await DB.put('folders', f); }
   for (const raw of d.notes) {
     if (!raw || !raw.id) continue;
@@ -1134,9 +1141,12 @@ async function syncDrive(opts) {
     const list = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id)`)).json();
     const fid = list.files && list.files[0] && list.files[0].id;
     let R = { notes: [], folders: [], tomb: {} };
-    if (fid) { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json(); R = { notes: d.notes || [], folders: d.folders || [], tomb: d.tomb || {} }; }
+    if (fid) { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json(); R = { notes: d.notes || [], folders: d.folders || [], tomb: d.tomb || {}, recovery: d.recovery || null }; }
     const L = { notes: S.notes.map(strip), folders: S.folders, tomb: tombs() };
     const m = mergeData(L, R);
+    const pickRec = pickRecovery(S.recovery, R.recovery);          // la configuración de recuperación viaja con las notas
+    if (pickRec !== S.recovery) await setRecovery(pickRec);
+    if (pickRec && pickRec !== R.recovery) m.upload = true;
     const openId = S.cur && S.cur.id;                    // la nota abierta no se toca en esta ronda
     m.applyLocal = m.applyLocal.filter(n => n.id !== openId); m.delLocal = m.delLocal.filter(id => id !== openId);
     for (const n of m.applyLocal) { const i = S.notes.findIndex(x => x.id === n.id); const full = Object.assign(newNote(n.type || 'text'), n); i >= 0 ? S.notes[i] = full : S.notes.push(full); await DB.put('notes', full); }
@@ -1145,7 +1155,7 @@ async function syncDrive(opts) {
     for (const id of m.delFolders) { S.folders = S.folders.filter(x => x.id !== id); await DB.del('folders', id); }
     saveTombs(m.tomb);
     if (m.upload || !fid) {
-      const body = JSON.stringify({ app: 'notas', version: 2, saved: Date.now(), notes: m.notes.map(strip), folders: m.folders, tomb: m.tomb });
+      const body = JSON.stringify({ app: 'notas', version: 2, saved: Date.now(), notes: m.notes.map(strip), folders: m.folders, tomb: m.tomb, recovery: pickRec || undefined });
       if (fid) await gfetch(`https://www.googleapis.com/upload/drive/v3/files/${fid}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
       else {
         const bd = 'nb' + Date.now();
@@ -1253,7 +1263,7 @@ const bk = {
 const dirSupported = () => 'showDirectoryPicker' in window;
 const pad2 = n => String(n).padStart(2, '0');
 const stamp = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}-${pad2(d.getMinutes())}`;
-const backupJSON = () => JSON.stringify({ app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes.map(strip), tomb: tombs() }, (k, v) => (k[0] === '_' ? undefined : v));
+const backupJSON = () => JSON.stringify({ app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes.map(strip), tomb: tombs(), recovery: S.recovery || undefined }, (k, v) => (k[0] === '_' ? undefined : v));
 async function gzip(text) { const st = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip')); return new Response(st).blob(); }
 async function gunzipText(blob) { const st = blob.stream().pipeThrough(new DecompressionStream('gzip')); return new Response(st).text(); }
 
@@ -1444,6 +1454,137 @@ async function removeBio() {
   for (const k of ['bio_cred', 'bio_prf', 'lock_bio']) pref(k, ''); renderSettings(); toast('Huella quitada');
 }
 
+/* ============ Recuperación de contraseñas (clave partida en dos mitades) ============ */
+// Se genera un par de claves RSA. La clave pública queda en la app y envuelve la clave de cada nota cifrada.
+// La clave privada se guarda cifrada con un secreto R que NO se guarda en ningún sitio: se parte en dos
+// mitades (A y B, con R = A xor B). Una mitad va al correo del usuario y la otra a su WhatsApp/SMS.
+// Con las dos mitades se reconstruye R, se abre la clave privada y se recupera cualquier nota.
+const recOn = () => !!(S.recovery && !S.recovery.removed);
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function b32enc(u8) { let bits = 0, val = 0, out = ''; for (const b of u8) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } val &= (1 << bits) - 1; } if (bits > 0) out += B32[(val << (5 - bits)) & 31]; return out; }
+function b32dec(str) { let bits = 0, val = 0; const out = []; for (const ch of str) { const i = B32.indexOf(ch); if (i < 0) throw new Error('carácter inválido'); val = (val << 5) | i; bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; } val &= (1 << bits) - 1; } return new Uint8Array(out); }
+const sha256 = async u8 => new Uint8Array(await crypto.subtle.digest('SHA-256', u8));
+const xorBytes = (a, b) => Uint8Array.from(a, (v, i) => v ^ b[i]);
+const openUrl = u => { const a = el('a', { href: u, target: '_blank', rel: 'noopener' }); document.body.append(a); a.click(); a.remove(); };
+const pickRecovery = (a, b) => !a ? (b || null) : !b ? a : (b.created > a.created ? b : a);
+async function setRecovery(r) { S.recovery = r; if (r) await DB.put('meta', Object.assign({}, r, { id: 'recovery' })); }
+
+async function shareCode(rid, bytes) {
+  const chk = (await sha256(bytes)).slice(0, 2), all = new Uint8Array(34); all.set(bytes); all.set(chk, 32);
+  return rid + '-' + b32enc(all).match(/.{1,5}/g).join('-');
+}
+async function parseShare(text) {
+  const s = String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); if (s.length < 20) throw new Error('código incompleto');
+  const rid = s.slice(0, 8), data = b32dec(s.slice(8)); if (data.length < 34) throw new Error('código incompleto');
+  const share = data.slice(0, 32), chk = (await sha256(share)).slice(0, 2);
+  if (chk[0] !== data[32] || chk[1] !== data[33]) throw new Error('código con errores (revisa que esté completo)');
+  return { rid, share };
+}
+async function openPrivateKey(rec, t1, t2) {
+  const a = await parseShare(t1), b = await parseShare(t2);
+  if (a.rid !== rec.rid || b.rid !== rec.rid) throw new Error('las partes no corresponden a esta recuperación');
+  const R = xorBytes(a.share, b.share);
+  const pkcs8 = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(rec.priv.iv) }, await crypto.subtle.importKey('raw', R, 'AES-GCM', false, ['decrypt']), unb64(rec.priv.d));
+  return crypto.subtle.importKey('pkcs8', pkcs8, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
+}
+async function genRecovery() {
+  const kp = await crypto.subtle.generateKey({ name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['encrypt', 'decrypt']);
+  const pub = await crypto.subtle.exportKey('jwk', kp.publicKey), pkcs8 = await crypto.subtle.exportKey('pkcs8', kp.privateKey);
+  const R = crypto.getRandomValues(new Uint8Array(32)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await crypto.subtle.importKey('raw', R, 'AES-GCM', false, ['encrypt']), pkcs8);
+  const A = crypto.getRandomValues(new Uint8Array(32)), B = xorBytes(R, A);
+  const rid = Array.from(crypto.getRandomValues(new Uint8Array(4)), x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+  return { rec: { rid, created: Date.now(), pub, priv: { iv: b64(iv), d: b64(ct) } }, A, B };
+}
+// Clave de la nota envuelta con la clave pública de recuperación (se guarda dentro de n.enc.rk)
+async function recoveryWrap(n) {
+  const r = S.recovery, cur = n.enc && n.enc.rk;
+  if (!recOn()) return undefined;
+  if (cur && cur.rid === r.rid) return cur;
+  const pub = await crypto.subtle.importKey('jwk', r.pub, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+  return { rid: r.rid, d: b64(await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, await crypto.subtle.exportKey('raw', n._key))) };
+}
+
+// --- recuperar una nota con las dos partes y fijar una contraseña nueva ---
+async function recoverNote(n) {
+  if (!recOn() || !n.enc.rk || n.enc.rk.rid !== S.recovery.rid) {
+    await info('Sin recuperación para esta nota', 'Esta nota se cifró antes de configurar la recuperación (o con otra configuración). Solo puede abrirse con su contraseña.'); return false;
+  }
+  const i1 = el('input', { placeholder: 'Parte 1 (del correo)' }), i2 = el('input', { placeholder: 'Parte 2 (de WhatsApp o SMS)' });
+  const r = await dialog('Recuperar con las dos partes', el('div', {}, el('p', { textContent: 'Pega la parte 1 (de tu correo) y la parte 2 (de WhatsApp o SMS). Da igual el orden.' }), i1, i2), [{ t: 'Cancelar', v: null }, { t: 'Recuperar', v: true }]);
+  if (!r) return false;
+  try {
+    const priv = await openPrivateKey(S.recovery, i1.value, i2.value);
+    const raw = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, unb64(n.enc.rk.d));
+    await decryptWith(n, await crypto.subtle.importKey('raw', raw, 'AES-GCM', true, ['encrypt', 'decrypt']));
+  } catch (e) { toast('No se pudo: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'las partes no son correctas')); return false; }
+  const p1 = await ask('Recuperada. Elige una contraseña nueva para esta nota', '', 'password');
+  if (p1) {
+    const p2 = await ask('Repite la contraseña nueva', '', 'password');
+    if (p1 === p2) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      await bioForget(n.id); n.enc = { s: b64(salt), iv: '', d: '' }; n._key = await deriveKey(p1, salt); n.updated = Date.now(); await persist(n);
+      toast('Contraseña restablecida');
+    } else toast('No coinciden: la contraseña anterior sigue vigente');
+  }
+  return true;
+}
+
+// --- configuración ---
+async function sendStep(title, text, code, openFn) {
+  for (;;) {
+    const r = await dialog(title, el('div', {}, el('p', { textContent: text }), el('code', { textContent: code, style: 'word-break:break-all;font-size:.78rem;display:block;margin-top:6px' })),
+      [{ t: 'Cancelar', v: null }, { t: 'Copiar', v: 'copy' }, { t: 'Abrir', v: 'open' }, { t: 'Ya lo envié', v: 'done' }]);
+    if (r === 'copy') { try { await navigator.clipboard.writeText(code); toast('Copiado'); } catch (e) { toast('No se pudo copiar'); } continue; }
+    if (r === 'open') { openFn(); continue; }
+    return r === 'done';
+  }
+}
+async function pasteBoth(title, intro) {
+  const i1 = el('input', { placeholder: 'Parte 1 (correo)' }), i2 = el('input', { placeholder: 'Parte 2 (WhatsApp o SMS)' });
+  const r = await dialog(title, el('div', {}, el('p', { textContent: intro }), i1, i2), [{ t: 'Cancelar', v: null }, { t: 'Comprobar', v: true }]);
+  return r ? [i1.value, i2.value] : null;
+}
+async function setupRecovery() {
+  if (!crypto.subtle) { toast('La recuperación requiere HTTPS'); return; }
+  if (recOn() && !(await confirmD('Ya hay una recuperación configurada. Si creas otra, las notas cifradas se protegerán con la nueva cuando las abras, y las partes anteriores dejarán de servir. ¿Continuar?'))) return;
+  const email = el('input', { type: 'email', value: pref('rec_email') || pref('gemail') || '', placeholder: 'Tu correo' });
+  const phone = el('input', { type: 'tel', value: pref('rec_phone') || '', placeholder: 'Tu teléfono con prefijo, ej. 5491122334455' });
+  const via = el('select', {}, el('option', { value: 'wa', textContent: 'Enviar la parte 2 por WhatsApp' }), el('option', { value: 'sms', textContent: 'Enviar la parte 2 por SMS' }));
+  const r = await dialog('Recuperación con dos partes', el('div', {}, el('p', { textContent: 'La clave de recuperación se parte en dos: una mitad a tu correo y otra a tu WhatsApp o SMS (mensajes a ti mismo). Quien tenga las dos partes podrá abrir tus notas cifradas; con una sola no pasa nada. Si pierdes ambas, no hay recuperación.' }), email, phone, via), [{ t: 'Cancelar', v: null }, { t: 'Continuar', v: true }]);
+  if (!r) return;
+  const mail = email.value.trim(), digits = phone.value.replace(/\D/g, '');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { toast('Correo no válido'); return; }
+  if (digits.length < 8 || digits.length > 15) { toast('Teléfono no válido: escríbelo con prefijo del país'); return; }
+  pref('rec_email', mail); pref('rec_phone', digits);
+  toast('Generando claves…'); await sleep(50);
+  const { rec, A, B } = await genRecovery(), c1 = await shareCode(rec.rid, A), c2 = await shareCode(rec.rid, B);
+  const note = 'Guarda este mensaje. Necesitarás las DOS partes (la otra va por ' + (via.value === 'wa' ? 'WhatsApp' : 'SMS') + ') para recuperar el acceso a tus notas cifradas si olvidas la contraseña. No lo reenvíes a nadie.';
+  const m1 = `Notas_EnPlus - PARTE 1 de 2 de la clave de recuperación\n\n${c1}\n\n${note}`, m2 = `Notas_EnPlus - PARTE 2 de 2 de la clave de recuperación\n\n${c2}\n\n${note}`;
+  if (!(await sendStep('Paso 1 de 3: parte 1 por correo', 'Pulsa Abrir: se abrirá tu correo con un mensaje para ti mismo. Envíalo y vuelve aquí.', c1,
+    () => openUrl(`mailto:${mail}?subject=${encodeURIComponent('Notas_EnPlus - parte 1 de 2 de la clave de recuperación')}&body=${encodeURIComponent(m1)}`)))) return;
+  if (!(await sendStep('Paso 2 de 3: parte 2 por ' + (via.value === 'wa' ? 'WhatsApp' : 'SMS'), 'Pulsa Abrir: se abrirá un chat con tu propio número. Envía el mensaje y vuelve aquí.', c2,
+    () => openUrl(via.value === 'wa' ? `https://wa.me/${digits}?text=${encodeURIComponent(m2)}` : `sms:+${digits}?body=${encodeURIComponent(m2)}`)))) return;
+  for (;;) {
+    const got = await pasteBoth('Paso 3 de 3: comprobación', 'Abre tu correo y tu WhatsApp/SMS, copia cada código y pégalos aquí. Así confirmamos que las dos partes llegaron bien antes de activar la recuperación.');
+    if (!got) { toast('Recuperación no activada'); return; }
+    try { await openPrivateKey(rec, got[0], got[1]); break; } catch (e) { toast('No coinciden: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'revisa los códigos')); }
+  }
+  await setRecovery(rec); toast('Recuperación activada. Las notas cifradas se protegen al abrirlas');
+}
+async function testRecovery() {
+  if (!recOn()) { toast('La recuperación no está configurada'); return; }
+  const got = await pasteBoth('Probar mis dos partes', 'Pega las dos partes que guardaste (correo y WhatsApp/SMS).'); if (!got) return;
+  try { await openPrivateKey(S.recovery, got[0], got[1]); await info('Todo bien', 'Las dos partes son correctas.'); } catch (e) { toast('No sirven: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'revisa los códigos')); }
+}
+function recoveryMenu() {
+  menu([
+    { t: recOn() ? 'Volver a configurar' : 'Configurar la recuperación', fn: async () => { await setupRecovery(); renderSettings(); } },
+    recOn() ? { t: 'Probar mis dos partes', fn: testRecovery } : null,
+    recOn() ? { t: 'Eliminar la recuperación', fn: async () => { if (await confirmD('Las notas cifradas ya no podrán recuperarse si olvidas su contraseña. ¿Eliminar?')) { await setRecovery({ rid: S.recovery.rid, created: Date.now(), removed: true }); renderSettings(); toast('Recuperación eliminada'); } } } : null,
+  ]);
+}
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
@@ -1512,7 +1653,9 @@ async function init() {
   try {
     await DB.open();
     S.notes = await DB.all('notes'); S.folders = await DB.all('folders');
-    S.bioNotes = new Set((await metaAll()).filter(m => m.id.startsWith('bio:')).map(m => m.id.slice(4)));
+    const metas = await metaAll();
+    S.bioNotes = new Set(metas.filter(m => m.id.startsWith('bio:')).map(m => m.id.slice(4)));
+    S.recovery = metas.find(m => m.id === 'recovery') || null;
     if (!S.folders.some(f => f.id === 'main')) { const m = { id: 'main', name: 'Carpeta principal', parent: null }; S.folders.push(m); await DB.put('folders', m); }
     const lim = Date.now() - TRASH_DAYS * 864e5;
     for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await forgetNote(n.id);

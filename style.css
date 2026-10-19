@@ -128,3 +128,7 @@ small{font-size:.6em}
 #lockMsg{min-height:1.6em;margin:10px 0;color:#ff6b6b;font-size:.9rem}
 .lockbox button{display:block;width:100%;margin-top:10px;padding:12px;border-radius:8px;background:var(--tab);color:#fff;font-weight:600}
 #lockBio{background:none;border:1px solid var(--acc);color:var(--acc)}
+
+.dlg .btns{flex-wrap:wrap}
+.dlg select{width:100%;margin-top:10px;padding:8px;background:var(--panel);color:var(--fg);border:1px solid var(--row);border-radius:6px;font:inherit}
+.dlg input{margin-top:8px}
