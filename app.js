@@ -188,6 +188,7 @@ async function persist(n) {
   }
   if (!S.notes.includes(n)) S.notes.push(n);
   await DB.put('notes', rec);
+  scheduleSync();
 }
 
 /* ============ Navegación ============ */
@@ -993,6 +994,8 @@ function renderSettings() {
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
   item('Recuperación de contraseñas', recOn() ? 'Configurada · clave partida en correo + WhatsApp/SMS' : 'No configurada', recoveryMenu);
+  sec('Protección de los datos');
+  item('Carpeta espejo en el PC (recomendado)', dirSupported() ? (mir.dir ? 'Activa: ' + mir.dir.name + ' — copia viva fuera del navegador' : 'No configurada: guarda cada nota como archivo en una carpeta del disco') : 'Solo en Chrome o Edge de PC', mirrorMenu);
   sec('Copias de seguridad automáticas');
   item('Copia automática', bk.on ? 'Activada' : 'Desactivada', () => { pref('bk_on', bk.on ? '0' : '1'); renderSettings(); });
   item('Frecuencia', bk.days === 1 ? 'Cada día' : `Cada ${bk.days} días`, () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref('bk_days', String(d)); renderSettings(); } }))));
@@ -1140,7 +1143,7 @@ async function syncDrive(opts) {
   if (syncing) return;
   if (!pref('gclient')) { if (auto) return; await setClientId(true); if (!pref('gclient')) return; }
   if (!navigator.onLine) { if (!auto) toast('Sin conexión a internet'); return; }
-  syncing = true; $('syncBtn').classList.add('spin'); if (!auto) toast('Sincronizando…');
+  syncing = true; S.dirty = false; $('syncBtn').classList.add('spin'); if (!auto) toast('Sincronizando…');
   try {
     await getToken(auto); pref('gconsent', '1');
     const q = encodeURIComponent(`name='${DRIVE_FILE}'`);
@@ -1599,6 +1602,114 @@ function recoveryMenu() {
   ]);
 }
 
+/* ============ Carpeta espejo en el PC (a prueba de "borrar datos del sitio") ============ */
+// Cada nota se guarda además como un archivo .json en una carpeta real del disco (Chrome/Edge de escritorio).
+// Si el navegador borra sus datos, las notas siguen en esa carpeta y se restauran al elegirla de nuevo.
+// Los archivos guardan exactamente lo mismo que la base interna: las notas cifradas siguen cifradas.
+const mir = { dir: null, q: new Map(), timer: 0, tapArmed: false };
+const mirName = id => 'n_' + String(id).replace(/[^\w.-]+/g, '_') + '.json';
+async function mirInit() {
+  if (!dirSupported()) return;
+  const r = (await metaAll()).find(m => m.id === 'mirdir'); mir.dir = (r && r.handle) || null;
+}
+async function mirPerm(interactive) {
+  if (!mir.dir) return false;
+  try {
+    let p = await mir.dir.queryPermission({ mode: 'readwrite' });
+    if (p !== 'granted' && interactive) p = await mir.dir.requestPermission({ mode: 'readwrite' });
+    return p === 'granted';
+  } catch (e) { return false; }
+}
+const mirSub = () => mir.dir.getDirectoryHandle('notas', { create: true });
+function mirQueue(op) { if (!mir.dir) return; mir.q.set(op.name, op); clearTimeout(mir.timer); mir.timer = setTimeout(() => mirFlush(false), 800); }
+function mirHook(op, store, v) {
+  if (!mir.dir) return;
+  if (store === 'notes') mirQueue(op === 'put' ? { k: 'put', name: mirName(v.id), data: JSON.stringify(v) } : { k: 'del', name: mirName(v) });
+  else if (store === 'folders') mirQueue({ k: 'put', name: '_folders.json', data: JSON.stringify(S.folders) });
+  else if (store === 'meta' && op === 'put' && v.id === 'recovery') mirQueue({ k: 'put', name: '_recovery.json', data: JSON.stringify(v) });
+}
+for (const m of ['put', 'del']) { const orig = DB[m].bind(DB); DB[m] = async (...a) => { const r = await orig(...a); try { mirHook(m, ...a); } catch (e) {} return r; }; }
+async function mirFlush(interactive) {
+  if (!mir.dir || !mir.q.size) return;
+  if (!(await mirPerm(interactive))) { armMirTap(); return; }
+  const sub = await mirSub(), ops = [...mir.q.values()]; mir.q.clear();
+  for (const op of ops) {
+    try {
+      if (op.k === 'put') { const fh = await sub.getFileHandle(op.name, { create: true }), w = await fh.createWritable(); await w.write(op.data); await w.close(); }
+      else await sub.removeEntry(op.name).catch(() => {});
+    } catch (e) { mir.q.set(op.name, op); }
+  }
+  if (mir.q.size) armMirTap();
+}
+function armMirTap() {
+  if (mir.tapArmed) return; mir.tapArmed = true;
+  document.addEventListener('pointerup', async () => { mir.tapArmed = false; await mirFlush(true); mirCheck(); }, { once: true });
+}
+async function mirRead() {
+  const sub = await mirSub(), notes = [], out = { notes, folders: [], recovery: null };
+  for await (const [name, h] of sub.entries()) {
+    if (h.kind !== 'file' || !name.endsWith('.json')) continue;
+    try {
+      const o = JSON.parse(await (await h.getFile()).text());
+      if (name.startsWith('n_')) { if (o && o.id) notes.push(o); } else if (name === '_folders.json') out.folders = o; else if (name === '_recovery.json') out.recovery = o;
+    } catch (e) {}
+  }
+  return out;
+}
+async function mirDumpAll() {
+  for (const n of await DB.all('notes')) mirQueue({ k: 'put', name: mirName(n.id), data: JSON.stringify(n) });
+  mirQueue({ k: 'put', name: '_folders.json', data: JSON.stringify(S.folders) });
+  if (S.recovery) mirQueue({ k: 'put', name: '_recovery.json', data: JSON.stringify(Object.assign({}, S.recovery, { id: 'recovery' })) });
+  await mirFlush(true);
+}
+async function mirRestore(ask) {
+  if (!(await mirPerm(true))) { toast('Sin permiso para leer la carpeta'); return; }
+  const d = await mirRead();
+  if (!d.notes.length) { if (ask) toast('La carpeta no contiene notas todavía'); return; }
+  if (ask && !(await confirmD(`La carpeta tiene ${d.notes.length} notas. ¿Restaurarlas aquí? (Se fusionan: gana la versión más reciente de cada nota.)`))) return;
+  const r = await applyBackupData(d, false); renderMain(); markCount();
+  toast(`Restauradas: ${r.add} nuevas, ${r.upd} actualizadas`);
+}
+// Al abrir: si la carpeta tiene bastantes más notas que la base interna, ofrece restaurar.
+async function mirCheck() {
+  if (!mir.dir || !(await mirPerm(false))) return;
+  try {
+    const sub = await mirSub(); let files = 0; for await (const [n, h] of sub.entries()) if (h.kind === 'file' && n.startsWith('n_')) files++;
+    if (files - S.notes.length >= 10) {
+      const r = await dialog('Hay notas en la carpeta del PC', el('p', { textContent: `La carpeta espejo tiene ${files} notas y esta app solo ${S.notes.length}. ¿Quieres restaurar las que faltan?` }), [{ t: 'Ahora no', v: 0 }, { t: 'Restaurar', v: 1 }]);
+      if (r === 1) await mirRestore(false);
+    }
+  } catch (e) {}
+}
+async function chooseMirrorFolder() {
+  try {
+    const handle = await showDirectoryPicker({ mode: 'readwrite', id: 'notas-mirror' });
+    mir.dir = handle; await DB.put('meta', { id: 'mirdir', handle });
+    const existing = await mirRead();
+    if (existing.notes.length && await confirmD(`Esta carpeta ya contiene ${existing.notes.length} notas. ¿Restaurarlas en la app antes de empezar a guardar aquí?`)) {
+      const r = await applyBackupData(existing, false); renderMain(); toast(`Restauradas: ${r.add} nuevas, ${r.upd} actualizadas`);
+    }
+    await mirDumpAll(); toast('Carpeta espejo activa: ' + handle.name);
+  } catch (e) { if (e.name !== 'AbortError') toast('No se pudo elegir la carpeta'); }
+}
+function mirrorMenu() {
+  if (!dirSupported()) { info('Carpeta espejo', 'Esta función necesita Chrome o Edge en un ordenador. En Android, el navegador no permite guardar en carpetas: tus notas se protegen con la sincronización con Google Drive y las copias exportadas.'); return; }
+  menu([
+    { t: mir.dir ? 'Cambiar de carpeta' : 'Elegir la carpeta', fn: async () => { await chooseMirrorFolder(); renderSettings(); } },
+    mir.dir ? { t: 'Restaurar desde la carpeta', fn: () => mirRestore(true) } : null,
+    mir.dir ? { t: 'Volver a escribir todas las notas ahora', fn: async () => { await mirDumpAll(); toast('Carpeta actualizada'); } } : null,
+    mir.dir ? { t: 'Dejar de usar la carpeta', fn: async () => { mir.dir = null; mir.q.clear(); await DB.del('meta', 'mirdir'); renderSettings(); toast('Carpeta espejo desactivada (los archivos se conservan)'); } } : null,
+  ]);
+}
+
+/* --- sincronización con Drive tras cada cambio (con retardo) --- */
+function scheduleSync() {
+  S.dirty = true;
+  if (pref('autosync') === '0' || !pref('gclient') || !pref('gconsent')) return;
+  clearTimeout(S.syncT);
+  S.syncT = setTimeout(() => { if (typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); }, 45000);
+}
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
@@ -1654,7 +1765,7 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); if (S.dirty && typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); runBackup(false).catch(() => {}); } });
   addEventListener('pagehide', () => { flush().catch(() => {}); if (!window.__dropPending) markCount(); });
 }
 
@@ -1670,6 +1781,7 @@ async function init() {
     const metas = await metaAll();
     S.bioNotes = new Set(metas.filter(m => m.id.startsWith('bio:')).map(m => m.id.slice(4)));
     S.recovery = metas.find(m => m.id === 'recovery') || null;
+    await mirInit();
     if (!S.folders.some(f => f.id === 'main')) { const m = { id: 'main', name: 'Carpeta principal', parent: null }; S.folders.push(m); await DB.put('folders', m); }
     const lim = Date.now() - TRASH_DAYS * 864e5;
     for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await forgetNote(n.id);
@@ -1684,6 +1796,7 @@ async function init() {
     } else markCount();
   } catch (e) { toast('Error al abrir el almacenamiento: ' + e.message); }
   renderMain();
+  mirCheck();
   // texto recibido desde otras apps (share target)
   const p = new URLSearchParams(location.search);
   if (p.has('text') || p.has('title') || p.has('url')) {
