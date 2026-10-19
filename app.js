@@ -1011,8 +1011,9 @@ function renderSettings() {
   item('Activada', bj.on ? 'Sí' : 'No', () => { pref('bj_on', bj.on ? '0' : '1'); renderSettings(); });
   item('Frecuencia', label(bj.days), freq('bj_days'));
   item('Hora', bj.time + ' · si no hay internet o la app está cerrada, se hace en cuanto se pueda', async () => { const v = await askTime('Hora de la copia JSON', bj.time); if (v) { pref('bj_time', v); renderSettings(); } });
-  item('Copias que se conservan', String(bj.keep), keepMenu('bj_keep'));
+  item('Copias que se conservan', bj.keep ? String(bj.keep) : 'Todas: no se borra ninguna automáticamente', () => menu([...[3, 7, 14, 30].map(k => ({ t: k + ' copias', fn: () => { pref('bj_keep', String(k)); renderSettings(); } })), { t: 'Todas (no borrar nunca)', fn: () => { pref('bj_keep', '0'); renderSettings(); } }]));
   item('Guardar en Google Drive', bj.drive ? 'Sí (carpeta privada de la app en tu Drive)' : 'No', () => { pref('bj_drive', bj.drive ? '0' : '1'); renderSettings(); });
+  item('Guardar en el teléfono (carpeta Descargas)', bj.phone ? 'Sí · un archivo .json que la app nunca borra; solo tú, a mano' : 'No', () => { pref('bj_phone', bj.phone ? '0' : '1'); renderSettings(); if (bj.phone) toast('Si Chrome pregunta, permite las descargas de este sitio'); });
   if (dirSupported()) item('Guardar en una carpeta del PC', bj.pc ? 'Sí · toca para elegir o cambiar la carpeta' : 'No · toca para elegir la carpeta', () => menu([
     { t: 'Elegir o cambiar la carpeta', fn: async () => { await chooseBackupFolder(); renderSettings(); } },
     { t: bj.pc ? 'No guardar en el PC' : 'Guardar también en el PC', fn: () => { pref('bj_pc', bj.pc ? '0' : '1'); renderSettings(); } },
@@ -1325,7 +1326,7 @@ async function folderWrite(name, json, interactive) {
     if (perm !== 'granted') { folderPending = { name, json }; armFolderTap(); return; }
     const fh = await dir.getFileHandle(name, { create: true }), w = await fh.createWritable(); await w.write(json); await w.close();
     const names = []; for await (const [n, h] of dir.entries()) if (h.kind === 'file' && /^notas-copia-.*\.json$/.test(n)) names.push(n);
-    names.sort().reverse(); for (const n of names.slice(bk.keep)) await dir.removeEntry(n);
+    names.sort().reverse(); if (bj.keep) for (const n of names.slice(bj.keep)) await dir.removeEntry(n);
     folderPending = null;
   } catch (e) { toast('No se pudo escribir en la carpeta de copias'); }
 }
@@ -1730,7 +1731,9 @@ function scheduleSync() {
 // Una web no puede ejecutarse con la app cerrada: la hora elegida es "a partir de cuándo toca". Si la app estaba cerrada
 // o no había internet a esa hora, la copia se hace en cuanto se abre la app o vuelve la conexión.
 const bj = {
-  get on() { return pref('bj_on') !== '0'; }, get days() { return +pref('bj_days') || 1; }, get keep() { return +pref('bj_keep') || 7; },
+  get on() { return pref('bj_on') !== '0'; }, get days() { return +pref('bj_days') || 1; },
+  get keep() { const v = pref('bj_keep'); return v === null || v === '' ? 7 : +v; },          // 0 = conservar todas, nunca borrar
+  get phone() { const v = pref('bj_phone'); return v === null || v === '' ? !dirSupported() : v === '1'; },   // descarga a la carpeta Descargas
   get time() { return pref('bj_time') || '03:00'; }, get drive() { return pref('bj_drive') !== '0'; }, get pc() { return pref('bj_pc') !== '0'; },
 };
 // Próximo momento en que toca una copia: la primera vez que sea HH:MM después de la última, más (días-1) días.
@@ -1753,7 +1756,7 @@ async function driveListJson() {
   const r = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime%20desc&pageSize=100`)).json();
   return r.files || [];
 }
-async function drivePruneJson(keep) { for (const f of (await driveListJson()).slice(keep)) await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' }); }
+async function drivePruneJson(keep) { if (!keep) return; for (const f of (await driveListJson()).slice(keep)) await gfetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' }); }
 
 let bjRunning = false, bjTapArmed = false;
 function armBjTap() {
@@ -1763,26 +1766,39 @@ function armBjTap() {
 async function runJsonBackup(force, auto) {
   if (bjRunning) return;
   if (!force && (!bj.on || !S.notes.length || Date.now() < nextDue(+pref('bj_last') || 0, bj.days, bj.time))) return;
-  const dest = { drive: bj.drive && !!pref('gclient') && !!pref('gconsent'), pc: bj.pc && !!(await folderHandle()) };
-  if (!dest.drive && !dest.pc) { if (force) toast('Elige dónde guardar la copia: Google Drive o una carpeta del PC'); return; }
+  const dest = { drive: bj.drive && !!pref('gclient') && !!pref('gconsent'), pc: bj.pc && !!(await folderHandle()), phone: bj.phone };
+  if (!dest.drive && !dest.pc && !dest.phone) { if (force) toast('Elige dónde guardar la copia: Google Drive, el teléfono (Descargas) o una carpeta del PC'); return; }
   bjRunning = true;
   try {
     const json = backupJSON(), ts = +pref('bj_try') || Date.now(); pref('bj_try', String(ts));   // mismo nombre en los reintentos
     const name = `notas-copia-${stamp(new Date(ts))}.json`;
-    let okPc = !dest.pc, okDrive = !dest.drive;
-    if (dest.pc) { await folderWrite(name, json, false); okPc = !folderPending; }
-    if (dest.drive) {
-      if (!navigator.onLine) throw new Error('offline');
-      await getToken(auto); await driveUploadJson(name, json); okDrive = true;
-      try { await drivePruneJson(bj.keep); } catch (e) {}
+    let done = {}; try { done = JSON.parse(pref('bj_done') || '{}'); } catch (e) {}
+    const save = () => pref('bj_done', JSON.stringify(done));
+    let err = null;
+    if (dest.pc && !done.pc) { await folderWrite(name, json, false); if (!folderPending) { done.pc = true; save(); } }
+    if (dest.phone && !done.phone) {
+      // Chrome solo permite descargar archivos tras un toque del usuario: si no lo hay, se hace con el próximo toque
+      if (force || (navigator.userActivation && navigator.userActivation.isActive)) { download(name, new Blob([json], { type: 'application/json' })); done.phone = true; save(); }
+      else armBjTap();
     }
-    if (okPc && okDrive) { pref('bj_last', String(Date.now())); pref('bj_try', ''); pref('bj_pending', '0'); if (force) toast('Copia JSON guardada'); }
-    else pref('bj_pending', '1');
-  } catch (e) {
-    pref('bj_pending', '1');
-    if (/popup|interaction|login_required|consent/i.test(e.message)) armBjTap();
-    else if (force) toast(e.message === 'offline' ? 'Sin internet: la copia se hará en cuanto vuelva la conexión' : 'Copia JSON: ' + e.message);
-  } finally { bjRunning = false; updateSyncStat(); }
+    if (dest.drive && !done.drive) {
+      try {
+        if (!navigator.onLine) throw new Error('offline');
+        await getToken(auto); await driveUploadJson(name, json); done.drive = true; save();
+        try { await drivePruneJson(bj.keep); } catch (e) {}
+      } catch (e) { err = e; }
+    }
+    if ((!dest.pc || done.pc) && (!dest.phone || done.phone) && (!dest.drive || done.drive)) {
+      pref('bj_last', String(Date.now())); pref('bj_try', ''); pref('bj_done', ''); pref('bj_pending', '0'); if (force) toast('Copia JSON guardada');
+    } else {
+      pref('bj_pending', '1');
+      if (err) {
+        if (/popup|interaction|login_required|consent/i.test(err.message)) armBjTap();
+        else if (force) toast(err.message === 'offline' ? 'Sin internet: la copia en Drive se hará en cuanto vuelva la conexión' : 'Copia JSON: ' + err.message);
+      }
+    }
+  } catch (e) { pref('bj_pending', '1'); if (force) toast('Copia JSON: ' + e.message); }
+  finally { bjRunning = false; updateSyncStat(); }
 }
 function checkSchedules() { runBackup(false).catch(() => {}); runJsonBackup(false, true).catch(() => {}); }
 
