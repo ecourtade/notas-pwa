@@ -256,7 +256,22 @@ const closeScreen = () => history.back();
 const inVault = () => S.stack.includes('vault');
 const curQ = () => inVault() ? S.vq : S.q;
 function syncSearchUI() { $('searchInput').value = curQ(); $('searchBar').hidden = !curQ(); }
-function openVault() { if (inVault() || S.selMode || S.stack[S.stack.length - 1] !== 'main') return; navigator.vibrate && navigator.vibrate(15); S.vq = ''; openScreen('vault'); syncSearchUI(); }
+let vaultBusy = false;
+async function vaultAuth() {   // huella si está configurada; si no, la contraseña de las notas; si no, el PIN de la app
+  if (bio.cred && (lock.bio || S.bioNotes.size)) { try { await bio.assert(false); return true; } catch (e) {} }
+  for (;;) {
+    if (pwvGet()) { const pw = await ask('Contraseña', '', 'password'); if (pw === null) return false; if (await pwOk(pw)) { sessionPw = pw; return true; } }
+    else if (lock.on) { const pw = await ask('PIN', '', 'password'); if (pw === null) return false; if (await checkPin(pw)) return true; }
+    else return true;
+    toast('Incorrecto');
+  }
+}
+async function openVault() {
+  if (vaultBusy || inVault() || S.selMode || S.stack[S.stack.length - 1] !== 'main') return;
+  navigator.vibrate && navigator.vibrate(15); vaultBusy = true;
+  try { if (!(await vaultAuth())) return; } finally { vaultBusy = false; }
+  S.vq = ''; openScreen('vault'); syncSearchUI();
+}
 let folderPicker = null;
 async function onPop() {
   if (S.stack.length < 2) { history.pushState({}, ''); return; }
