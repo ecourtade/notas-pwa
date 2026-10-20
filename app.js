@@ -1063,7 +1063,7 @@ function renderSettings() {
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
   item('Contraseña de las notas', pwvGet() ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla (una sola para todas las notas cifradas)', masterSetup);
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
-  item('Recuperación de contraseñas', recOn() ? 'Configurada · clave partida en correo + WhatsApp/SMS' : 'No configurada', recoveryMenu);
+  item('Recuperación de contraseñas', recOn() ? (S.recovery.mode === 'drive' ? 'Configurada · con tu cuenta de Google' : 'Configurada · clave partida (método antiguo)') : 'No configurada', recoveryMenu);
   sec('Protección de los datos');
   item('Carpeta espejo (recomendado)', dirSupported() ? (mir.dir ? 'Activa: ' + mir.dir.name + ' — copia viva fuera del navegador' : 'No configurada: guarda cada nota como archivo en una carpeta de tu dispositivo') : 'Este navegador no permite elegir carpetas', mirrorMenu);
   const freq = (key, cur) => () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref(key, String(d)); renderSettings(); } })));
@@ -1200,8 +1200,8 @@ let gToken = null, gExp = 0;
 const loadGIS = () => (window.google && google.accounts) ? Promise.resolve() : new Promise((res, rej) => {
   const s = el('script', { src: 'https://accounts.google.com/gsi/client', onload: res, onerror: () => rej(new Error('Sin conexión a internet')) }); document.head.append(s);
 });
-async function getToken(auto) {
-  if (gToken && Date.now() < gExp - 60000) return gToken;
+async function getToken(auto, force) {
+  if (!force && gToken && Date.now() < gExp - 60000) return gToken;
   const cid = pref('gclient'); if (!cid) throw new Error('noclient');
   await loadGIS();
   return new Promise((res, rej) => {
@@ -1210,7 +1210,7 @@ async function getToken(auto) {
       callback: r => { if (r.error) rej(new Error(r.error_description || r.error)); else { gToken = r.access_token; gExp = Date.now() + r.expires_in * 1000; res(gToken); } },
       error_callback: e => rej(new Error(e.type === 'popup_failed_to_open' ? 'popup' : e.type === 'popup_closed' ? 'Cancelaste el inicio de sesión' : (e.message || e.type))),
     });
-    tc.requestAccessToken({ prompt: auto ? 'none' : pref('gconsent') ? '' : 'select_account' });
+    tc.requestAccessToken({ prompt: auto ? 'none' : force ? 'select_account' : pref('gconsent') ? '' : 'select_account' });
   });
 }
 async function gfetch(url, opts = {}) {
@@ -1553,11 +1553,13 @@ async function removeBio() {
   for (const k of ['bio_cred', 'bio_prf', 'lock_bio']) pref(k, ''); renderSettings(); toast('Huella quitada');
 }
 
-/* ============ Recuperación de contraseñas (clave partida en dos mitades) ============ */
+/* ============ Recuperación de contraseñas (con la cuenta de Google; o clave partida, método antiguo) ============ */
 // Se genera un par de claves RSA. La clave pública queda en la app y envuelve la clave de cada nota cifrada.
 // La clave privada se guarda cifrada con un secreto R que NO se guarda en ningún sitio: se parte en dos
 // mitades (A y B, con R = A xor B). Una mitad va al correo del usuario y la otra a su WhatsApp/SMS.
 // Con las dos mitades se reconstruye R, se abre la clave privada y se recupera cualquier nota.
+// Método actual (rec.mode === 'drive'): R no se parte; vive en un archivo aparte de la carpeta privada de Drive
+// (nunca en las copias ni en la carpeta espejo) y solo se lee tras volver a elegir la cuenta de Google.
 const recOn = () => !!(S.recovery && !S.recovery.removed);
 const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 function b32enc(u8) { let bits = 0, val = 0, out = ''; for (const b of u8) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } val &= (1 << bits) - 1; } if (bits > 0) out += B32[(val << (5 - bits)) & 31]; return out; }
@@ -1582,7 +1584,9 @@ async function parseShare(text) {
 async function openPrivateKey(rec, t1, t2) {
   const a = await parseShare(t1), b = await parseShare(t2);
   if (a.rid !== rec.rid || b.rid !== rec.rid) throw new Error('las partes no corresponden a esta recuperación');
-  const R = xorBytes(a.share, b.share);
+  return openPrivateKeyR(rec, xorBytes(a.share, b.share));
+}
+async function openPrivateKeyR(rec, R) {
   const pkcs8 = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(rec.priv.iv) }, await crypto.subtle.importKey('raw', R, 'AES-GCM', false, ['decrypt']), unb64(rec.priv.d));
   return crypto.subtle.importKey('pkcs8', pkcs8, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
 }
@@ -1593,7 +1597,7 @@ async function genRecovery() {
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await crypto.subtle.importKey('raw', R, 'AES-GCM', false, ['encrypt']), pkcs8);
   const A = crypto.getRandomValues(new Uint8Array(32)), B = xorBytes(R, A);
   const rid = Array.from(crypto.getRandomValues(new Uint8Array(4)), x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
-  return { rec: { rid, created: Date.now(), pub, priv: { iv: b64(iv), d: b64(ct) } }, A, B };
+  return { rec: { rid, created: Date.now(), pub, priv: { iv: b64(iv), d: b64(ct) } }, A, B, R };
 }
 // Clave de la nota envuelta con la clave pública de recuperación (se guarda dentro de n.enc.rk)
 async function recoveryWrap(n) {
@@ -1604,19 +1608,46 @@ async function recoveryWrap(n) {
   return { rid: r.rid, d: b64(await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, await crypto.subtle.exportKey('raw', n._key))) };
 }
 
-// --- recuperar una nota con las dos partes y fijar una contraseña nueva ---
+// --- clave de recuperación guardada en Drive (archivo aparte del de las notas) ---
+const REC_FILE = 'notas-recovery-key.json';
+async function recDriveFind() {
+  const l = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${encodeURIComponent(`name='${REC_FILE}'`)}&fields=files(id)`)).json();
+  return l.files && l.files[0] && l.files[0].id;
+}
+async function recDriveSave(rid, R) {
+  const body = JSON.stringify({ rid, k: b64(R) }), fid = await recDriveFind();
+  if (fid) { await gfetch(`https://www.googleapis.com/upload/drive/v3/files/${fid}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }); return; }
+  const bd = 'nr' + Date.now();
+  const mp = `--${bd}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name: REC_FILE, parents: ['appDataFolder'] })}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${bd}--`;
+  await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + bd }, body: mp });
+}
+async function recDriveLoad(rid) {
+  const fid = await recDriveFind(); if (!fid) throw new Error('esta cuenta de Google no tiene la clave de recuperación');
+  const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json();
+  if (d.rid !== rid) throw new Error('la clave guardada en Drive es de otra configuración de recuperación');
+  return unb64(d.k);
+}
+// Devuelve la clave privada de recuperación (null si cancelas). Con Drive pide elegir de nuevo la cuenta de Google.
+async function recoveryKey(rec) {
+  if (rec.mode === 'drive') {
+    if (!(await confirmD('Para recuperar la contraseña tienes que volver a iniciar sesión en tu cuenta de Google. Elige la misma cuenta con la que activaste la recuperación. ¿Continuar?'))) return null;
+    await getToken(false, true);
+    return openPrivateKeyR(rec, await recDriveLoad(rec.rid));
+  }
+  const got = await pasteBoth('Recuperar con las dos partes', 'Método antiguo: pega la parte 1 (de tu correo) y la parte 2 (de WhatsApp o SMS). Da igual el orden.');
+  return got ? openPrivateKey(rec, got[0], got[1]) : null;
+}
+
+// --- recuperar una nota y fijar una contraseña nueva ---
 async function recoverNote(n) {
   if (!recOn() || !n.enc.rk || n.enc.rk.rid !== S.recovery.rid) {
     await info('Sin recuperación para esta nota', 'Esta nota se cifró antes de configurar la recuperación (o con otra configuración). Solo puede abrirse con su contraseña.'); return false;
   }
-  const i1 = el('input', { placeholder: 'Parte 1 (del correo)' }), i2 = el('input', { placeholder: 'Parte 2 (de WhatsApp o SMS)' });
-  const r = await dialog('Recuperar con las dos partes', el('div', {}, el('p', { textContent: 'Pega la parte 1 (de tu correo) y la parte 2 (de WhatsApp o SMS). Da igual el orden.' }), i1, i2), [{ t: 'Cancelar', v: null }, { t: 'Recuperar', v: true }]);
-  if (!r) return false;
   try {
-    const priv = await openPrivateKey(S.recovery, i1.value, i2.value);
+    const priv = await recoveryKey(S.recovery); if (!priv) return false;
     const raw = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, unb64(n.enc.rk.d));
     await decryptWith(n, await crypto.subtle.importKey('raw', raw, 'AES-GCM', true, ['encrypt', 'decrypt']));
-  } catch (e) { toast('No se pudo: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'las partes no son correctas')); return false; }
+  } catch (e) { toast('No se pudo: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'la clave de recuperación no es correcta')); return false; }
   const p1 = await ask('Recuperada. Elige una contraseña nueva para esta nota', '', 'password');
   if (p1) {
     const p2 = await ask('Repite la contraseña nueva', '', 'password');
@@ -1630,15 +1661,6 @@ async function recoverNote(n) {
 }
 
 // --- configuración ---
-async function sendStep(title, text, code, openFn) {
-  for (;;) {
-    const r = await dialog(title, el('div', {}, el('p', { textContent: text }), el('code', { textContent: code, style: 'word-break:break-all;font-size:.78rem;display:block;margin-top:6px' })),
-      [{ t: 'Cancelar', v: null }, { t: 'Copiar', v: 'copy' }, { t: 'Abrir', v: 'open' }, { t: 'Ya lo envié', v: 'done' }]);
-    if (r === 'copy') { try { await navigator.clipboard.writeText(code); toast('Copiado'); } catch (e) { toast('No se pudo copiar'); } continue; }
-    if (r === 'open') { openFn(); continue; }
-    return r === 'done';
-  }
-}
 async function pasteBoth(title, intro) {
   const i1 = el('input', { placeholder: 'Parte 1 (correo)' }), i2 = el('input', { placeholder: 'Parte 2 (WhatsApp o SMS)' });
   const r = await dialog(title, el('div', {}, el('p', { textContent: intro }), i1, i2), [{ t: 'Cancelar', v: null }, { t: 'Comprobar', v: true }]);
@@ -1646,41 +1668,28 @@ async function pasteBoth(title, intro) {
 }
 async function setupRecovery() {
   if (!crypto.subtle) { toast('La recuperación requiere HTTPS'); return; }
-  if (recOn() && !(await confirmD('Ya hay una recuperación configurada. Si creas otra, las notas cifradas se protegerán con la nueva cuando las abras, y las partes anteriores dejarán de servir. ¿Continuar?'))) return;
-  const email = el('input', { type: 'email', value: pref('rec_email') || pref('gemail') || '', placeholder: 'Tu correo' });
-  const phone = el('input', { type: 'tel', value: pref('rec_phone') || '', placeholder: 'Tu teléfono con prefijo, ej. 5491122334455' });
-  const via = el('select', {}, el('option', { value: 'wa', textContent: 'Enviar la parte 2 por WhatsApp' }), el('option', { value: 'sms', textContent: 'Enviar la parte 2 por SMS' }));
-  const r = await dialog('Recuperación con dos partes', el('div', {}, el('p', { textContent: 'La clave de recuperación se parte en dos: una mitad a tu correo y otra a tu WhatsApp o SMS (mensajes a ti mismo). Quien tenga las dos partes podrá abrir tus notas cifradas; con una sola no pasa nada. Si pierdes ambas, no hay recuperación.' }), email, phone, via), [{ t: 'Cancelar', v: null }, { t: 'Continuar', v: true }]);
-  if (!r) return;
-  const mail = email.value.trim(), digits = phone.value.replace(/\D/g, '');
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { toast('Correo no válido'); return; }
-  if (digits.length < 8 || digits.length > 15) { toast('Teléfono no válido: escríbelo con prefijo del país'); return; }
-  pref('rec_email', mail); pref('rec_phone', digits);
-  toast('Generando claves…'); await sleep(50);
-  const { rec, A, B } = await genRecovery(), c1 = await shareCode(rec.rid, A), c2 = await shareCode(rec.rid, B);
-  const note = 'Guarda este mensaje. Necesitarás las DOS partes (la otra va por ' + (via.value === 'wa' ? 'WhatsApp' : 'SMS') + ') para recuperar el acceso a tus notas cifradas si olvidas la contraseña. No lo reenvíes a nadie.';
-  const m1 = `Notas_EnPlus - PARTE 1 de 2 de la clave de recuperación\n\n${c1}\n\n${note}`, m2 = `Notas_EnPlus - PARTE 2 de 2 de la clave de recuperación\n\n${c2}\n\n${note}`;
-  if (!(await sendStep('Paso 1 de 3: parte 1 por correo', 'Pulsa Abrir: se abrirá tu correo con un mensaje para ti mismo. Envíalo y vuelve aquí.', c1,
-    () => openUrl(`mailto:${mail}?subject=${encodeURIComponent('Notas_EnPlus - parte 1 de 2 de la clave de recuperación')}&body=${encodeURIComponent(m1)}`)))) return;
-  if (!(await sendStep('Paso 2 de 3: parte 2 por ' + (via.value === 'wa' ? 'WhatsApp' : 'SMS'), 'Pulsa Abrir: se abrirá un chat con tu propio número. Envía el mensaje y vuelve aquí.', c2,
-    () => openUrl(via.value === 'wa' ? `https://wa.me/${digits}?text=${encodeURIComponent(m2)}` : `sms:+${digits}?body=${encodeURIComponent(m2)}`)))) return;
-  for (;;) {
-    const got = await pasteBoth('Paso 3 de 3: comprobación', 'Abre tu correo y tu WhatsApp/SMS, copia cada código y pégalos aquí. Así confirmamos que las dos partes llegaron bien antes de activar la recuperación.');
-    if (!got) { toast('Recuperación no activada'); return; }
-    try { await openPrivateKey(rec, got[0], got[1]); break; } catch (e) { toast('No coinciden: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'revisa los códigos')); }
-  }
-  await setRecovery(rec); toast('Recuperación activada. Las notas cifradas se protegen al abrirlas');
+  if (!pref('gclient')) { toast('Primero conecta Google Drive con el botón de sincronizar'); return; }
+  if (recOn() && !(await confirmD('Ya hay una recuperación configurada. Si creas otra, las notas cifradas se protegerán con la nueva cuando las abras, y la anterior dejará de servir. ¿Continuar?'))) return;
+  if (!(await confirmD('La clave de recuperación se guardará en la carpeta privada de tu Google Drive. Quien entre en tu cuenta de Google podrá recuperar y abrir tus notas cifradas, así que protege esa cuenta con verificación en dos pasos. Si algún día olvidas la contraseña, volverás a iniciar sesión en Google para recuperarla. ¿Activar?'))) return;
+  try {
+    await getToken(false, true);
+    toast('Generando claves…'); await sleep(50);
+    const { rec, R } = await genRecovery(); rec.mode = 'drive';
+    await recDriveSave(rec.rid, R);
+    await openPrivateKeyR(rec, await recDriveLoad(rec.rid));   // comprobación: lo guardado en Drive abre la clave
+    await setRecovery(rec); toast('Recuperación activada. Las notas cifradas se protegen al abrirlas');
+  } catch (e) { toast('No se activó la recuperación: ' + e.message); }
 }
 async function testRecovery() {
   if (!recOn()) { toast('La recuperación no está configurada'); return; }
-  const got = await pasteBoth('Probar mis dos partes', 'Pega las dos partes que guardaste (correo y WhatsApp/SMS).'); if (!got) return;
-  try { await openPrivateKey(S.recovery, got[0], got[1]); await info('Todo bien', 'Las dos partes son correctas.'); } catch (e) { toast('No sirven: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'revisa los códigos')); }
+  try { const k = await recoveryKey(S.recovery); if (k) await info('Todo bien', 'La clave de recuperación es correcta.'); }
+  catch (e) { toast('No sirve: ' + (e.message && !/operation/i.test(e.message) ? e.message : 'la clave no es correcta')); }
 }
 function recoveryMenu() {
   menu([
     { t: recOn() ? 'Volver a configurar' : 'Configurar la recuperación', fn: async () => { await setupRecovery(); renderSettings(); } },
-    recOn() ? { t: 'Probar mis dos partes', fn: testRecovery } : null,
-    recOn() ? { t: 'Eliminar la recuperación', fn: async () => { if (await confirmD('Las notas cifradas ya no podrán recuperarse si olvidas su contraseña. ¿Eliminar?')) { await setRecovery({ rid: S.recovery.rid, created: Date.now(), removed: true }); renderSettings(); toast('Recuperación eliminada'); } } } : null,
+    recOn() ? { t: 'Probar la recuperación', fn: testRecovery } : null,
+    recOn() ? { t: 'Eliminar la recuperación', fn: async () => { if (await confirmD('Las notas cifradas ya no podrán recuperarse si olvidas su contraseña. ¿Eliminar?')) { if (S.recovery.mode === 'drive') { try { await getToken(false); const f = await recDriveFind(); if (f) await gfetch('https://www.googleapis.com/drive/v3/files/' + f, { method: 'DELETE' }); } catch (e) {} } await setRecovery({ rid: S.recovery.rid, created: Date.now(), removed: true }); renderSettings(); toast('Recuperación eliminada'); } } } : null,
   ]);
 }
 
