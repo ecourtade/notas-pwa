@@ -142,6 +142,7 @@ async function unlock(n) {
   if (!n.enc || n._key) return true;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS'); return false; }
   if (sessionPw) { try { await decryptWith(n, await deriveKey(sessionPw, unb64(n.enc.s))); return true; } catch (e) {} }
+  if (!sessionPw && await masterBioGet()) { try { await decryptWith(n, await deriveKey(sessionPw, unb64(n.enc.s))); return true; } catch (e) {} }
   if (await bioUnlock(n)) return true;                      // huella, si está activada para esta nota
   for (;;) {
     const inp = el('input', { type: 'password' });
@@ -150,7 +151,7 @@ async function unlock(n) {
     setTimeout(() => inp.focus(), 50); inp.onkeydown = e => { if (e.key === 'Enter') $('overlay').querySelector('.btns button:last-child').click(); };
     const r = await dp; if (r === null) return false;
     if (r === 'forgot') { if (await recoverNote(n)) return true; continue; }
-    try { await decryptWith(n, await deriveKey(inp.value, unb64(n.enc.s))); sessionPw = inp.value; setTimeout(() => offerBio(n), 500); return true; }
+    try { await decryptWith(n, await deriveKey(inp.value, unb64(n.enc.s))); sessionPw = inp.value; setTimeout(() => offerMaster(sessionPw), 500); return true; }
     catch (e) { toast('Contraseña incorrecta'); }
   }
 }
@@ -257,11 +258,17 @@ const inVault = () => S.stack.includes('vault');
 const curQ = () => inVault() ? S.vq : S.q;
 function syncSearchUI() { $('searchInput').value = curQ(); $('searchBar').hidden = !curQ(); }
 let vaultBusy = false;
-async function vaultAuth() {   // huella si está configurada; si no, la contraseña de las notas; si no, el PIN de la app
-  if (bio.cred && (lock.bio || S.bioNotes.size)) { try { await bio.assert(false); return true; } catch (e) {} }
+async function vaultAuth() {   // huella / patrón / PIN del teléfono (válido para todas las notas); si no, contraseña de las notas; si no, PIN de la app
+  if (await masterBioGet()) return true;
   for (;;) {
-    if (pwvGet()) { const pw = await ask('Contraseña', '', 'password'); if (pw === null) return false; if (await pwOk(pw)) { sessionPw = pw; return true; } }
-    else if (lock.on) { const pw = await ask('PIN', '', 'password'); if (pw === null) return false; if (await checkPin(pw)) return true; }
+    if (pwvGet()) {
+      const inp = el('input', { type: 'password' }), btns = [{ t: 'Cancelar', v: null }];
+      if (lock.on) btns.push({ t: 'PIN', v: 'pin' }); btns.push({ t: 'Aceptar', v: true });
+      setTimeout(() => inp.focus(), 50); inp.onkeydown = e => { if (e.key === 'Enter') $('overlay').querySelector('.btns button:last-child').click(); };
+      const r = await dialog('Contraseña', inp, btns); if (r === null) return false;
+      if (r === 'pin') { const pin = await ask('PIN', '', 'password'); if (pin === null) return false; if (await checkPin(pin)) return true; }
+      else if (await pwOk(inp.value)) { sessionPw = inp.value; setTimeout(() => offerMaster(sessionPw), 500); return true; }
+    } else if (lock.on) { const pw = await ask('PIN', '', 'password'); if (pw === null) return false; if (await checkPin(pw)) return true; }
     else return true;
     toast('Incorrecto');
   }
@@ -1477,6 +1484,36 @@ async function prfWrapKey(prfBytes) {
   const base = await crypto.subtle.importKey('raw', prfBytes, 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('notas-bio-wrap') }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
+// Un único registro «maestro»: guarda la contraseña de las notas protegida por la huella (o el patrón/PIN del teléfono) y sirve para todas las notas.
+async function masterBioSave(pw) {
+  try {
+    if (!bio.cred) await bio.register();
+    const a = await bio.assert(true), rec = { id: 'bm:master' }, raw = new TextEncoder().encode(pw);
+    if (a.prf) { const iv = crypto.getRandomValues(new Uint8Array(12)); rec.mode = 'prf'; rec.iv = b64(iv); rec.d = b64(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await prfWrapKey(a.prf), raw)); }
+    else {
+      const ok = await dialog('Desbloqueo del teléfono sin cifrado reforzado', el('p', { textContent: 'Tu dispositivo permite desbloquear con huella, patrón o PIN, pero no ofrece la función para proteger la contraseña con ellos. Puedo guardarla en el dispositivo y liberarla solo cuando el desbloqueo coincida. Es cómodo, pero menos seguro que escribirla.\n\n¿Activarlo de todos modos?' }), [{ t: 'No', v: false }, { t: 'Activar', v: true }]);
+      if (!ok) return false; rec.mode = 'gate'; rec.raw = b64(raw);
+    }
+    await DB.put('meta', rec); pref('bio_master', '1'); return true;
+  } catch (e) { if (e.name !== 'NotAllowedError') toast('No se pudo activar: ' + (e.message || e.name)); return false; }
+}
+async function masterBioGet() {
+  if (pref('bio_master') !== '1' || !bio.cred) return false;
+  const meta = (await metaAll()).find(m => m.id === 'bm:master'); if (!meta) return false;
+  try {
+    const a = await bio.assert(meta.mode === 'prf'); let raw;
+    if (meta.mode === 'prf') { if (!a.prf) throw new Error('prf'); raw = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(meta.iv) }, await prfWrapKey(a.prf), unb64(meta.d))); }
+    else raw = unb64(meta.raw);
+    const pw = new TextDecoder().decode(raw);
+    if (!(await pwOk(pw))) throw new Error('pw');
+    sessionPw = pw; return true;
+  } catch (e) { if (e.name !== 'NotAllowedError') { pref('bio_master', ''); try { await DB.del('meta', 'bm:master'); } catch (e2) {} } return false; }
+}
+async function offerMaster(pw) {
+  if (pref('bio_master') === '1' || pref('bio_offer') === '0' || !(await bio.available())) return;
+  const r = await dialog('¿Desbloquear con el teléfono?', el('p', { textContent: 'La próxima vez podrás abrir las notas cifradas con tu huella, y si falla, con el patrón o PIN del teléfono. Vale para todas las notas.' }), [{ t: 'No preguntar más', v: 'never' }, { t: 'Ahora no', v: null }, { t: 'Activar', v: 'ok' }]);
+  if (r === 'never') pref('bio_offer', '0'); else if (r === 'ok' && await masterBioSave(pw)) toast('Activado para todas las notas');
+}
 async function bioForget(noteId) { S.bioNotes.delete(noteId); try { await DB.del('meta', 'bio:' + noteId); } catch (e) {} }
 async function bioActivate(n) {
   if (!n._key) return false;
@@ -1579,7 +1616,8 @@ function lockMenu() {
 async function removeBio() {
   if (!(await confirmD('¿Quitar la huella registrada en este dispositivo? Las notas cifradas volverán a pedir la contraseña.'))) return;
   for (const id of [...S.bioNotes]) await bioForget(id);
-  for (const k of ['bio_cred', 'bio_prf', 'lock_bio']) pref(k, ''); renderSettings(); toast('Huella quitada');
+  try { await DB.del('meta', 'bm:master'); } catch (e) {}
+  for (const k of ['bio_cred', 'bio_prf', 'lock_bio', 'bio_master']) pref(k, ''); renderSettings(); toast('Huella quitada');
 }
 
 /* ============ Recuperación de contraseñas (con la cuenta de Google; o clave partida, método antiguo) ============ */
