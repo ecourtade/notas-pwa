@@ -1276,11 +1276,16 @@ async function syncDrive(opts) {
     syncLog({ down: m.applyLocal.length, del: m.delLocal.length, up: m.upload ? m.notes.length : 0, total: S.notes.length });
     if (!auto || m.applyLocal.length || m.delLocal.length) toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`);
     renderMain();
+    if (!auto && !pref('gemail') && !pref('gemail_asked')) {   // sin correo la sincronización automática no puede entrar sola
+      pref('gemail_asked', '1');
+      const v = await ask('Para que la sincronización automática funcione al abrir la app, escribe el correo de tu cuenta de Google (puedes cambiarlo en Ajustes)', '', 'email');
+      if (v && v.trim()) { pref('gemail', v.trim()); gToken = null; toast('Correo guardado'); }
+    }
   } catch (e) {
     if (!/popup|interaction|login_required|consent|internet|network|fetch/i.test(e.message)) pref('lastSyncErr', e.message);
     if (auto) {
       // Google exige un gesto del usuario para abrir su ventana: se reintenta con el primer toque.
-      if (/popup|interaction|login_required|consent/i.test(e.message)) armFirstTap(); else if (!/internet|network|fetch/i.test(e.message)) toast('Toca ⟳ para volver a conectar con Google');
+      if (/popup|interaction|login_required|consent/i.test(e.message)) { armFirstTap(); if (!pref('gemail')) toast('Falta tu correo de Google en Ajustes para sincronizar sola al abrir'); } else if (!/internet|network|fetch/i.test(e.message)) toast('Toca ⟳ para volver a conectar con Google');
     } else toast(e.message === 'noclient' ? 'Falta el ID de cliente de Google' : 'No se pudo sincronizar: ' + e.message);
   } finally { syncing = false; $('syncBtn').classList.remove('spin'); updateSyncStat(); }
 }
