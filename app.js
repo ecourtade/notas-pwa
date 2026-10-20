@@ -294,7 +294,7 @@ function renderMain() {
   const sel = S.selMode;
   $('mainBar').hidden = sel; $('selBar').hidden = !sel;
   $('selCount').textContent = S.sel.size + ' seleccionadas';
-  $('mainTitle').textContent = 'Notas_EnPlus';
+  $('mainTitle').textContent = 'Audio Manager';
   $('folderBar').innerHTML = ic(S.view.kind === 'trash' ? 'trash' : 'folder');
   $('folderBar').append(' ' + viewName());
   $('folderBar').onclick = () => pickFolder();
@@ -311,10 +311,11 @@ function renderMain() {
       n.color ? Object.assign(el('span', { className: 'stripe' }), { style: `background:${n.color}` }) : null,
       el('span', { innerHTML: TYPE_ICON[n.type] }),
       el('div', { className: 'mid' }, el('div', { className: 't', textContent: noteTitle(n) }),
-        (n.enc || n.reminder || n.readonly) ? el('div', { className: 's', innerHTML: (n.enc ? ic('lock') : '') + (n.reminder ? ic('bell') : '') + (n.readonly ? '<span>solo lectura</span>' : '') }) : null,
+        (n.reminder || n.readonly) ? el('div', { className: 's', innerHTML: (n.reminder ? ic('bell') : '') + (n.readonly ? '<span>solo lectura</span>' : '') }) : null,
         noteLabels(n).length ? el('div', { className: 'chips' }, noteLabels(n).slice(0, 4).map(l => labelChip(l, { onclick: e => { e.stopPropagation(); applyLabelFilter(l); } })), noteLabels(n).length > 4 ? el('span', { className: 'fnote', textContent: '+' + (noteLabels(n).length - 4) }) : null) : null),
       el('div', { className: 'd', textContent: fmtDate(n.updated) }));
-    pressable(row, () => noteTap(n), () => noteHold(n));
+    const guarded = n.enc && !S.selMode && longOpen();   // cifradas: solo se abren manteniendo pulsado 3 s
+    pressable(row, guarded ? () => {} : () => noteTap(n), guarded ? () => { navigator.vibrate && navigator.vibrate(15); openNote(n); } : () => noteHold(n), guarded ? 3000 : 500);
     rows.push(row);
   }
   list.append(...rows);
@@ -324,9 +325,10 @@ function renderMain() {
   $('empty').style.whiteSpace = 'pre-line';
   $('addBtn').hidden = S.view.kind === 'trash';
 }
-function pressable(node, tap, hold) {
+const longOpen = () => pref('longopen') !== '0';
+function pressable(node, tap, hold, ms = 500) {
   let t, held = false, moved = false, sx = 0, sy = 0;
-  node.addEventListener('pointerdown', e => { held = moved = false; sx = e.clientX; sy = e.clientY; t = setTimeout(() => { held = true; hold(); }, 500); });
+  node.addEventListener('pointerdown', e => { held = moved = false; sx = e.clientX; sy = e.clientY; t = setTimeout(() => { held = true; hold(); }, ms); });
   node.addEventListener('pointermove', e => { if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 10) { moved = true; clearTimeout(t); } });
   for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) node.addEventListener(ev, () => clearTimeout(t));
   node.addEventListener('click', e => { if (!held && !moved) tap(e); });
@@ -1103,8 +1105,13 @@ function renderSettings() {
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
   item('Registro de sincronización', 'Últimas operaciones (para diagnosticar problemas)', () => { let l = []; try { l = JSON.parse(pref('synclog') || '[]'); } catch (e) {} info('Registro de sincronización', l.length ? l.slice().reverse().map(e => fmtDate(e.t) + ' — ' + (e.blocked ? 'DETENIDO: pedía borrar ' + e.blocked : e.drop ? `FALTABAN ${e.drop} notas al abrir (${e.prev} → ${e.now})` : `↓${e.down} ↑${e.up} borradas:${e.del} total:${e.total}`)).join('\n') : 'Sin registros todavía'); });
   item('Cerrar sesión de Google', '', googleSignOut);
+  sec('Ajustes avanzados');
+  item('Apertura de elementos', 'Toca para ver los detalles', async () => {
+    const r = await dialog('Apertura de elementos', el('p', { style: 'white-space:pre-line', textContent: 'Las notas cifradas no se abren con un toque: hay que mantener pulsado sobre ellas 3 segundos, sin mover el dedo (el teléfono vibra al abrirse). Un toque normal no hace nada.\n\nTampoco muestran candado, para que no se note que están cifradas. Al abrirlas se pide la contraseña como siempre.\n\nMientras seleccionas varias notas funcionan como las demás.\n\nEstado actual: ' + (longOpen() ? 'activado.' : 'desactivado (se abren con un toque).') }), [{ t: 'Cerrar', v: null }, { t: longOpen() ? 'Desactivar' : 'Activar', v: true }]);
+    if (r) { pref('longopen', longOpen() ? '0' : '1'); renderMain(); toast(longOpen() ? 'Activado' : 'Desactivado'); }
+  });
   sec('Acerca de');
-  item('Notas', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
+  item('Audio Manager', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
 }
 function pickFile(accept, multiple, fn) {
   const f = $('fileIn'); f.accept = accept; f.multiple = multiple; f.removeAttribute('capture');
@@ -1430,7 +1437,7 @@ const bio = {
   async available() { try { return !!(window.PublicKeyCredential && navigator.credentials && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; } },
   async register() {
     const c = await navigator.credentials.create({ publicKey: {
-      rp: { name: 'Notas_EnPlus' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'notas', displayName: 'Notas_EnPlus' },
+      rp: { name: 'Audio Manager' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'notas', displayName: 'Audio Manager' },
       challenge: crypto.getRandomValues(new Uint8Array(32)), pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
       authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000, extensions: { prf: {} },
     } });
@@ -1635,7 +1642,7 @@ async function recVerify() {
     const cred = pref('rec_cred');
     if (cred) { try { await bio.assert(false, cred); return true; } catch (e) { if (e && e.name === 'NotAllowedError' && !/not.*found|no.*credential/i.test(e.message || '')) throw e; } }
     const c = await navigator.credentials.create({ publicKey: {
-      rp: { name: 'Notas_EnPlus' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'recuperacion', displayName: 'Notas_EnPlus recuperación' },
+      rp: { name: 'Audio Manager' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'recuperacion', displayName: 'Audio Manager' },
       challenge: crypto.getRandomValues(new Uint8Array(32)), pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
       authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000,
     } });
