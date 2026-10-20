@@ -1436,8 +1436,8 @@ const bio = {
     } });
     pref('bio_cred', b64(c.rawId));
   },
-  async assert(prf) {
-    const publicKey = { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: unb64(this.cred) }], userVerification: 'required', timeout: 60000 };
+  async assert(prf, cred) {
+    const publicKey = { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: unb64(cred || this.cred) }], userVerification: 'required', timeout: 60000 };
     if (prf) publicKey.extensions = { prf: { eval: { first: PRF_SALT } } };
     const a = await navigator.credentials.get({ publicKey });
     const r = a.getClientExtensionResults(), first = r.prf && r.prf.results && r.prf.results.first;
@@ -1627,10 +1627,26 @@ async function recDriveLoad(rid) {
   if (d.rid !== rid) throw new Error('la clave guardada en Drive es de otra configuración de recuperación');
   return unb64(d.k);
 }
+// Segundo factor local: huella / PIN / patrón del dispositivo (WebAuthn con verificación de usuario obligatoria).
+// Usa una credencial propia de la recuperación ('rec_cred'); si no existe se crea (el propio alta pide la verificación).
+async function recVerify() {
+  if (!(await bio.available())) return await confirmD('Este dispositivo no tiene huella, PIN ni patrón de bloqueo, así que no puedo pedirlo. Sin eso, la recuperación solo queda protegida por tu cuenta de Google abierta en este navegador. ¿Continuar igualmente?');
+  try {
+    const cred = pref('rec_cred');
+    if (cred) { try { await bio.assert(false, cred); return true; } catch (e) { if (e && e.name === 'NotAllowedError' && !/not.*found|no.*credential/i.test(e.message || '')) throw e; } }
+    const c = await navigator.credentials.create({ publicKey: {
+      rp: { name: 'Notas_EnPlus' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'recuperacion', displayName: 'Notas_EnPlus recuperación' },
+      challenge: crypto.getRandomValues(new Uint8Array(32)), pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000,
+    } });
+    pref('rec_cred', b64(c.rawId)); return true;
+  } catch (e) { toast('No se verificó tu huella o PIN: ' + (e.name === 'NotAllowedError' ? 'cancelado' : e.message)); return false; }
+}
 // Devuelve la clave privada de recuperación (null si cancelas). Con Drive pide elegir de nuevo la cuenta de Google.
 async function recoveryKey(rec) {
   if (rec.mode === 'drive') {
-    if (!(await confirmD('Para recuperar la contraseña tienes que volver a iniciar sesión en tu cuenta de Google. Elige la misma cuenta con la que activaste la recuperación. ¿Continuar?'))) return null;
+    if (!(await confirmD('Para recuperar la contraseña tienes que volver a iniciar sesión en tu cuenta de Google. Antes se te pedirá tu huella o el PIN del dispositivo. Elige la misma cuenta con la que activaste la recuperación. ¿Continuar?'))) return null;
+    if (!(await recVerify())) return null;
     await getToken(false, true);
     return openPrivateKeyR(rec, await recDriveLoad(rec.rid));
   }
@@ -1670,8 +1686,9 @@ async function setupRecovery() {
   if (!crypto.subtle) { toast('La recuperación requiere HTTPS'); return; }
   if (!pref('gclient')) { toast('Primero conecta Google Drive con el botón de sincronizar'); return; }
   if (recOn() && !(await confirmD('Ya hay una recuperación configurada. Si creas otra, las notas cifradas se protegerán con la nueva cuando las abras, y la anterior dejará de servir. ¿Continuar?'))) return;
-  if (!(await confirmD('La clave de recuperación se guardará en la carpeta privada de tu Google Drive. Quien entre en tu cuenta de Google podrá recuperar y abrir tus notas cifradas, así que protege esa cuenta con verificación en dos pasos. Si algún día olvidas la contraseña, volverás a iniciar sesión en Google para recuperarla. ¿Activar?'))) return;
+  if (!(await confirmD('La clave de recuperación se guardará en la carpeta privada de tu Google Drive. Quien entre en tu cuenta de Google podrá recuperar y abrir tus notas cifradas, así que protege esa cuenta con verificación en dos pasos. Si algún día olvidas la contraseña, deberás confirmar con tu huella o el PIN del dispositivo y elegir tu cuenta de Google. ¿Activar?'))) return;
   try {
+    if (!(await recVerify())) return;
     await getToken(false, true);
     toast('Generando claves…'); await sleep(50);
     const { rec, R } = await genRecovery(); rec.mode = 'drive';
