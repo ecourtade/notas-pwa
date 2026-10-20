@@ -2161,6 +2161,40 @@ function renderFilterBar() {
   bar.hidden = !(filterActive(f)); if (filterActive(f)) bar.append(...parts);
 }
 
+
+/* ============ Portada: ecualizador de adorno (no hace nada; el botón muestra la app) ============ */
+const EQ_BANDS = [['60', 'Hz'], ['230', 'Hz'], ['910', 'Hz'], ['3,6', 'kHz'], ['14', 'kHz']];
+const EQ_PRESETS = { Normal: [0, 0, 0, 0, 0], Rock: [5, 3, -2, 3, 5], Pop: [-1, 2, 5, 2, -1], Jazz: [4, 2, -2, 2, 5], Clásica: [5, 3, -2, 4, 4], Graves: [8, 5, 1, 0, 0], Agudos: [0, 0, 1, 5, 8], Voz: [-2, 0, 5, 3, 0] };
+function eqSlider(host, vert, min, max, val, fmt, onchange) {
+  const f = el('div', { className: 'eq-f' }), k = el('div', { className: 'eq-k' });
+  const t = el('div', { className: vert ? 'eq-t' : 'eq-h' }, f, k); host.append(t);
+  const api = {
+    set(v) { api.v = v; const p = (v - min) / (max - min) * 100; if (vert) { k.style.top = (100 - p) + '%'; f.style.top = (100 - p) + '%'; f.style.bottom = '0'; if (min < 0) { const z = (0 - min) / (max - min) * 100; f.style.top = (100 - Math.max(p, z)) + '%'; f.style.bottom = Math.min(p, z) + '%'; } } else { k.style.left = p + '%'; f.style.width = p + '%'; } onchange && onchange(v); },
+  };
+  const move = e => { const r = t.getBoundingClientRect(), q = vert ? 1 - (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width; api.set(Math.round(Math.max(0, Math.min(1, q)) * (max - min) + min)); };
+  let down = false;
+  t.addEventListener('pointerdown', e => { down = true; t.setPointerCapture(e.pointerId); move(e); });
+  t.addEventListener('pointermove', e => { if (down) move(e); });
+  for (const ev of ['pointerup', 'pointercancel']) t.addEventListener(ev, () => { down = false; });
+  api.set(val); return api;
+}
+function setupEq() {
+  const bands = [], pre = $('eqPre');
+  EQ_BANDS.forEach(([n, u]) => {
+    const b = el('div', { className: 'eq-b' }), lab = el('b'); 
+    const sl = eqSlider(b, true, -12, 12, 0, null, v => { lab.textContent = (v > 0 ? '+' : '') + v + ' dB'; pre.querySelectorAll('button').forEach(x => x.classList.remove('on')); });
+    b.append(el('span', { textContent: n + ' ' + u }), lab); $('eqBands').append(b); bands.push(sl);
+  });
+  for (const [name, vals] of Object.entries(EQ_PRESETS)) pre.append(el('button', { textContent: name, onclick: e => { vals.forEach((v, i) => bands[i].set(v)); e.target.classList.add('on'); } }));
+  pre.firstChild.classList.add('on');
+  for (const [name, mx] of [['Refuerzo de graves', 1000], ['Virtualizador', 1000]]) {
+    const r = el('div', { className: 'eq-r' }, el('span', { textContent: name })); $('eqExtra').append(r); eqSlider(r, false, 0, mx, 0);
+  }
+  $('eqOn').onchange = e => $('eq').classList.toggle('off', !e.target.checked);
+  $('eqGo').onclick = () => { $('eq').hidden = true; };
+}
+const showEq = () => { $('eq').hidden = false; };
+
 /* ============ Arranque ============ */
 function wire() {
   setIcons();
@@ -2219,13 +2253,13 @@ function wire() {
   $('edTitle').onclick = () => { if (S.find) closeFind(); };
   addEventListener('resize', () => S.resize && !$('drawWrap').hidden && S.resize());
   addEventListener('popstate', onPop);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); if (S.dirty && typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); checkSchedules(); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { lock.hiddenAt = Date.now(); if (!window.__dropPending) markCount(); if (S.dirty && typeof gToken !== 'undefined' && gToken && Date.now() < gExp - 60000) syncDrive({ auto: true }); flush().catch(() => {}); } else { if (lock.on && !lock.shown && Date.now() - lock.hiddenAt >= lock.delay * 60000) showLock(); if (Date.now() - lock.hiddenAt >= 60000) showEq(); checkReminders(); if (autoSyncDue() && gToken) syncDrive({ auto: true }); checkSchedules(); } });
   addEventListener('pagehide', () => { flush().catch(() => {}); if (!window.__dropPending) markCount(); });
 }
 
 async function init() {
   S.bioNotes = new Set();
-  wire();
+  wire(); setupEq();
   if (lock.on) showLock();                       // pantalla de bloqueo antes de cargar nada
   document.documentElement.dataset.theme = settings.theme;
   history.replaceState({ s: 'main' }, ''); history.pushState({ s: 'main' }, '');   // evita salir de la app con el primer "atrás"
