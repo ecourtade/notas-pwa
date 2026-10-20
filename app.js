@@ -1128,7 +1128,7 @@ function renderSettings() {
   item('Importar archivos de texto (.txt)', 'Uno o varios; cada archivo crea una nota', () => pickFile('.txt,text/plain', true, importTxt));
   item('Vaciar papelera', '', emptyTrash);
   sec('Sincronización');
-  item('Sincronización automática', pref('autosync') !== '0' ? 'Activada: mientras la sesión de Google esté abierta (se abre con ⟳)' : 'Desactivada: solo con el botón', () => { pref('autosync', pref('autosync') !== '0' ? '0' : '1'); renderSettings(); });
+  item('Sincronización automática', pref('autosync') !== '0' ? 'Activada: al abrir la app y al volver a ella' : 'Desactivada: solo con el botón', () => { pref('autosync', pref('autosync') !== '0' ? '0' : '1'); renderSettings(); });
   item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
   item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
@@ -1234,7 +1234,6 @@ const loadGIS = () => (window.google && google.accounts) ? Promise.resolve() : n
 async function getToken(auto, force) {
   if (!force && gToken && Date.now() < gExp - 60000) return gToken;
   const cid = pref('gclient'); if (!cid) throw new Error('noclient');
-  if (auto && !force) throw new Error('notoken');   // sin sesión válida la sincronización automática no abre la ventana de Google (se ve un parpadeo); queda para el botón ⟳
   await loadGIS();
   return new Promise((res, rej) => {
     const tc = google.accounts.oauth2.initTokenClient({
@@ -1307,7 +1306,6 @@ async function syncDrive(opts) {
       if (v && v.trim()) { pref('gemail', v.trim()); gToken = null; toast('Correo guardado'); }
     }
   } catch (e) {
-    if (auto && e.message === 'notoken') { S.dirty = true; return; }
     if (!/popup|interaction|login_required|consent|internet|network|fetch/i.test(e.message)) pref('lastSyncErr', e.message);
     if (auto) {
       // Google exige un gesto del usuario para abrir su ventana: se reintenta con el primer toque.
