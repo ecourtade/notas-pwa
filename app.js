@@ -207,7 +207,7 @@ async function masterSetup() {
 
 /* ============ Estado ============ */
 const S = {
-  notes: [], folders: [], view: { kind: 'all', id: null }, q: '', sel: new Set(), selMode: false,
+  notes: [], folders: [], view: { kind: 'all', id: null }, q: '', vq: '', sel: new Set(), selMode: false,
   cur: null, stack: ['main'], tab: 'all', find: null,
 };
 const settings = {
@@ -247,16 +247,22 @@ async function persist(n) {
 /* ============ Navegación ============ */
 function showTop() {
   const top = S.stack[S.stack.length - 1];
-  for (const id of ['main', 'editor', 'folders', 'settings']) $(id).hidden = id !== top;
-  if (top === 'main') renderMain();
+  const scr = top === 'vault' ? 'main' : top;
+  for (const id of ['main', 'editor', 'folders', 'settings']) $(id).hidden = id !== scr;
+  if (scr === 'main') renderMain();
 }
 function openScreen(name) { S.stack.push(name); history.pushState({ s: name }, ''); showTop(); }
 const closeScreen = () => history.back();
+const inVault = () => S.stack.includes('vault');
+const curQ = () => inVault() ? S.vq : S.q;
+function syncSearchUI() { $('searchInput').value = curQ(); $('searchBar').hidden = !curQ(); }
+function openVault() { if (inVault() || S.selMode || S.stack[S.stack.length - 1] !== 'main') return; navigator.vibrate && navigator.vibrate(15); S.vq = ''; openScreen('vault'); syncSearchUI(); }
 let folderPicker = null;
 async function onPop() {
   if (S.stack.length < 2) { history.pushState({}, ''); return; }
   if (!$('overlay').hidden) { $('overlay').hidden = true; history.pushState({ s: S.stack[S.stack.length - 1] }, ''); return; }
   const closed = S.stack.pop();
+  if (closed === 'vault') { S.vq = ''; S.stack.includes('vault') || syncSearchUI(); }
   if (closed === 'editor') await leaveEditor();
   if (closed === 'folders' && folderPicker) { folderPicker(null); folderPicker = null; }
   showTop();
@@ -268,21 +274,23 @@ function viewName() {
   return v.kind === 'all' ? 'Todas las notas' : v.kind === 'trash' ? 'Papelera' : folderName(v.id);
 }
 function visibleNotes() {
-  const v = S.view, f = S.filter, toks = S.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const vault = inVault(), v = S.view, f = S.filter, toks = curQ().trim().toLowerCase().split(/\s+/).filter(Boolean);
   const tagQ = toks.filter(t => t[0] === '#' && t.length > 1).map(t => t.slice(1)), q = toks.filter(t => t[0] !== '#').join(' ');
   const searching = !!(q || tagQ.length), scopeAll = v.kind === 'all' || (f.allFolders && v.kind === 'folder');
   let ns = S.notes.filter(n => {
+    if (vault) return !n.deleted && !!n.enc;
     if (v.kind === 'trash') return !!n.deleted;
-    if (n.deleted) return false;
+    if (n.deleted || n.enc) return false;
     if (searching) return true;
     return scopeAll || n.folder === v.id;
   });
   if (searching) ns = ns.filter(n => {
+    if (vault) return [...tagQ, q].every(t => !t || noteTitle(n).toLowerCase().includes(t));
     const ls = noteLabels(n).map(labelKey);
     if (tagQ.length && !tagQ.every(t => ls.some(l => l.includes(t)))) return false;
     return !q || [noteTitle(n), n.body, n.title, ...n.items.map(i => i.t), ...ls].join('\n').toLowerCase().includes(q);
   });
-  if (filterActive(f)) ns = ns.filter(n => matchesFilter(n));
+  if (!vault && filterActive(f)) ns = ns.filter(n => matchesFilter(n));
   const dir = settings.desc ? -1 : 1, so = settings.sort;
   return ns.sort((a, b) => {
     const c = so === 'title' ? noteTitle(a).localeCompare(noteTitle(b)) : so === 'type' ? a.type.localeCompare(b.type) : (a[so === 'created' ? 'created' : 'updated'] - b[so === 'created' ? 'created' : 'updated']);
@@ -301,7 +309,9 @@ function renderMain() {
   updateSyncStat();
   const list = $('list'); list.replaceChildren();
   const rows = [];
-  if (S.view.kind === 'folder' && !S.q) for (const f of childFolders(S.view.id)) {
+  const vault = inVault(), cq = curQ();
+  $('folderBar').hidden = vault; $('folderBtn').hidden = vault; $('searchFilter').hidden = vault;
+  if (!vault && S.view.kind === 'folder' && !S.q) for (const f of childFolders(S.view.id)) {
     rows.push(el('div', { className: 'row', onclick: () => { S.view = { kind: 'folder', id: f.id }; renderMain(); } },
       el('span', { innerHTML: TYPE_ICON.folder }), el('div', { className: 'mid' }, el('div', { className: 't', textContent: f.name }))));
   }
@@ -313,18 +323,16 @@ function renderMain() {
       el('div', { className: 'mid' }, el('div', { className: 't', textContent: noteTitle(n) }),
         (n.reminder || n.readonly) ? el('div', { className: 's', innerHTML: (n.reminder ? ic('bell') : '') + (n.readonly ? '<span>solo lectura</span>' : '') }) : null,
         noteLabels(n).length ? el('div', { className: 'chips' }, noteLabels(n).slice(0, 4).map(l => labelChip(l, { onclick: e => { e.stopPropagation(); applyLabelFilter(l); } })), noteLabels(n).length > 4 ? el('span', { className: 'fnote', textContent: '+' + (noteLabels(n).length - 4) }) : null) : null));
-    const guarded = n.enc && !S.selMode && longOpen();   // cifradas: solo se abren manteniendo pulsado 3 s
-    pressable(row, guarded ? () => {} : () => noteTap(n), guarded ? () => { navigator.vibrate && navigator.vibrate(15); openNote(n); } : () => noteHold(n), guarded ? 3000 : 500);
+    pressable(row, () => noteTap(n), () => noteHold(n));
     rows.push(row);
   }
   list.append(...rows);
   $('empty').hidden = rows.length > 0;
-  renderFilterBar();
-  $('empty').textContent = S.q || filterActive() ? 'Sin resultados' : S.view.kind === 'trash' ? 'La papelera está vacía' : 'Aún no hay notas.\nToca + para crear una.';
+  renderFilterBar(); if (vault) $('filterBar').hidden = true;
+  $('empty').textContent = cq || (!vault && filterActive()) ? 'Sin resultados' : S.view.kind === 'trash' ? 'La papelera está vacía' : 'Aún no hay notas.\nToca + para crear una.';
   $('empty').style.whiteSpace = 'pre-line';
-  $('addBtn').hidden = S.view.kind === 'trash';
+  $('addBtn').hidden = vault || S.view.kind === 'trash';
 }
-const longOpen = () => pref('longopen') !== '0';
 function pressable(node, tap, hold, ms = 500) {
   let t, held = false, moved = false, sx = 0, sy = 0;
   node.addEventListener('pointerdown', e => { held = moved = false; sx = e.clientX; sy = e.clientY; t = setTimeout(() => { held = true; hold(); }, ms); });
@@ -1104,11 +1112,6 @@ function renderSettings() {
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
   item('Registro de sincronización', 'Últimas operaciones (para diagnosticar problemas)', () => { let l = []; try { l = JSON.parse(pref('synclog') || '[]'); } catch (e) {} info('Registro de sincronización', l.length ? l.slice().reverse().map(e => fmtDate(e.t) + ' — ' + (e.blocked ? 'DETENIDO: pedía borrar ' + e.blocked : e.drop ? `FALTABAN ${e.drop} notas al abrir (${e.prev} → ${e.now})` : `↓${e.down} ↑${e.up} borradas:${e.del} total:${e.total}`)).join('\n') : 'Sin registros todavía'); });
   item('Cerrar sesión de Google', '', googleSignOut);
-  sec('Ajustes avanzados');
-  item('Apertura de elementos', 'Toca para ver los detalles', async () => {
-    const r = await dialog('Apertura de elementos', el('p', { style: 'white-space:pre-line', textContent: 'Las notas cifradas no se abren con un toque: hay que mantener pulsado sobre ellas 3 segundos, sin mover el dedo (el teléfono vibra al abrirse). Un toque normal no hace nada.\n\nTampoco muestran candado, para que no se note que están cifradas. Al abrirlas se pide la contraseña como siempre.\n\nMientras seleccionas varias notas funcionan como las demás.\n\nEstado actual: ' + (longOpen() ? 'activado.' : 'desactivado (se abren con un toque).') }), [{ t: 'Cerrar', v: null }, { t: longOpen() ? 'Desactivar' : 'Activar', v: true }]);
-    if (r) { pref('longopen', longOpen() ? '0' : '1'); renderMain(); toast(longOpen() ? 'Activado' : 'Desactivado'); }
-  });
   sec('Acerca de');
   item('Audio Manager', 'Funciona sin conexión. Los datos se guardan solo en este dispositivo.', () => {});
 }
@@ -2110,8 +2113,9 @@ function wire() {
   setIcons();
   $('addBtn').onclick = newMenu; $('moreBtn').onclick = mainMenu; $('syncBtn').onclick = syncDrive; $('syncBar').onclick = () => ((folderPending || (mir.dir && mir.needPerm)) ? grantFolders() : syncDrive());
   $('folderBtn').onclick = () => pickFolder();
-  $('searchBtn').onclick = () => { const b = $('searchBar'); b.hidden = !b.hidden; if (b.hidden) { S.q = ''; $('searchInput').value = ''; renderMain(); } else $('searchInput').focus(); };
-  $('searchInput').oninput = e => { S.q = e.target.value; renderMain(); };
+  $('searchBtn').onclick = () => { const b = $('searchBar'); b.hidden = !b.hidden; if (b.hidden) { if (inVault()) S.vq = ''; else S.q = ''; $('searchInput').value = ''; renderMain(); } else $('searchInput').focus(); };
+  $('searchInput').oninput = e => { if (inVault()) S.vq = e.target.value; else S.q = e.target.value; renderMain(); };
+  pressable($('mainTitle'), () => {}, openVault, 3000);
   $('selClose').onclick = endSel;
   $('searchFilter').onclick = filterDialog;
   $('selTag').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id)); if (await labelsDialog(ns)) endSel(); };

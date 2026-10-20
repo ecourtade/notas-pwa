@@ -1,6 +1,6 @@
 # Notas_EnPlus
 
-> Desde el 2026-10-20 la app se muestra al usuario como **«Audio Manager»** (camuflaje: nombre, icono de ecualizador, notas cifradas sin candado y abiertas con pulsación de 3 s). Internamente y en los repos sigue llamándose Notas_EnPlus. No revelar en la interfaz que son notas.
+> Desde el 2026-10-20 la app se muestra al usuario como **«Audio Manager»** (camuflaje: nombre, icono de ecualizador, notas cifradas sin candado y en una lista oculta: mantener pulsado 3 s el título «Audio Manager»). Internamente y en los repos sigue llamándose Notas_EnPlus. No revelar en la interfaz que son notas.
 
 PWA de notas tipo Note Everything (HTML/CSS/JS sin compilación). App publicada en GitHub Pages desde este repo.
 
