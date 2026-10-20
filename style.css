@@ -168,5 +168,5 @@ small{font-size:.6em}
 .eq-h{flex:1;height:30px;position:relative;touch-action:none;cursor:pointer}
 .eq-h:before{content:"";position:absolute;left:0;right:0;top:50%;height:4px;margin-top:-2px;border-radius:2px;background:#2d313a}
 .eq-h .eq-f{left:0;top:50%;height:4px;width:auto;margin:-2px 0 0}.eq-h .eq-k{top:50%;margin-top:-13px}
-.eq-go{background:#3d7be6;border-radius:24px;padding:13px;font-size:1.05rem;color:#fff}
+.eq-go{flex:1;align-self:stretch;min-height:44px;margin:0 8px;background:transparent;border:0;outline:0}
 #eq.off .eq-t,#eq.off .eq-h{opacity:.4}
