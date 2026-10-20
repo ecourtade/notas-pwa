@@ -155,6 +155,56 @@ async function unlock(n) {
   }
 }
 
+// --- contraseña única de las notas (se configura en Ajustes) ---
+const pwvGet = () => { try { return JSON.parse(pref('pwv') || 'null'); } catch (e) { return null; } };
+async function pwvSet(pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await deriveKey(pw, salt), new TextEncoder().encode('notas-ok'));
+  pref('pwv', JSON.stringify({ s: b64(salt), iv: b64(iv), d: b64(ct) }));
+}
+async function pwOk(pw) {   // ¿es la contraseña de las notas? (verificador local o, si falta, una nota cifrada)
+  const v = pwvGet() || (S.notes.find(x => x.enc && x.enc.iv) || {}).enc;
+  if (!v) return true;
+  try { await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(v.iv) }, await deriveKey(pw, unb64(v.s)), unb64(v.d)); return true; } catch (e) { return false; }
+}
+async function masterPw() {   // contraseña lista para cifrar; si no está configurada, lleva a Ajustes
+  if (!pwvGet()) { toast('Primero crea la contraseña de tus notas en Ajustes → Seguridad'); renderSettings(); openScreen('settings'); return null; }
+  if (sessionPw) return sessionPw;
+  const pw = await ask('Contraseña de tus notas', '', 'password'); if (!pw) return null;
+  if (!(await pwOk(pw))) { toast('Contraseña incorrecta'); return null; }
+  return (sessionPw = pw);
+}
+async function masterSetup() {
+  if (!crypto.subtle) { toast('El cifrado requiere HTTPS (o localhost)'); return; }
+  const have = !!pwvGet(), encNotes = S.notes.filter(x => x.enc);
+  if (!have) {
+    if (encNotes.length) {   // ya hay notas cifradas (otro dispositivo): se adopta su contraseña
+      const pw = await ask('Escribe la contraseña que ya usas en tus notas cifradas', '', 'password'); if (!pw) return;
+      if (!(await pwOk(pw))) { toast('No es la contraseña de tus notas cifradas'); return; }
+      await pwvSet(pw); sessionPw = pw; toast('Contraseña configurada en este dispositivo'); renderSettings(); return;
+    }
+    const p1 = await ask('Elige la contraseña de tus notas (la misma para todas)', '', 'password'); if (!p1) return;
+    const p2 = await ask('Repite la contraseña', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return; }
+    await pwvSet(p1); sessionPw = p1; toast('Listo. No hay forma de recuperarla si la olvidas (salvo la recuperación configurada)'); renderSettings(); return;
+  }
+  const old = await ask('Contraseña actual', '', 'password'); if (!old) return;
+  if (!(await pwOk(old))) { toast('Contraseña incorrecta'); return; }
+  const p1 = await ask('Contraseña nueva', '', 'password'); if (!p1) return;
+  const p2 = await ask('Repite la contraseña nueva', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return; }
+  let done = 0, skipped = 0;
+  for (const n of encNotes) {
+    try {
+      if (!n._key && n.enc.iv) await decryptWith(n, await deriveKey(old, unb64(n.enc.s)));
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      await bioForget(n.id); n.enc = { s: b64(salt), iv: '', d: '' }; n._key = await deriveKey(p1, salt); n.updated = Date.now(); await persist(n);
+      if (n !== S.cur) { n.body = ''; n.html = ''; n.items = []; delete n._key; }
+      done++;
+    } catch (e) { skipped++; }
+  }
+  await pwvSet(p1); sessionPw = p1; renderSettings();
+  toast(`Contraseña cambiada en ${done} nota(s)` + (skipped ? `; ${skipped} tenían otra contraseña y no se tocaron` : ''));
+}
+
 /* ============ Estado ============ */
 const S = {
   notes: [], folders: [], view: { kind: 'all', id: null }, q: '', sel: new Set(), selMode: false,
@@ -968,22 +1018,10 @@ async function toggleEncrypt() {
   const n = S.cur;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS (o localhost)'); return; }
   if (n.enc) { if (!(await confirmD('¿Quitar el cifrado de esta nota?'))) return; n.enc = null; delete n._key; bioForget(n.id); touch(); toast('Cifrado quitado'); drawEditor(); return; }
-  let p1 = sessionPw;
-  if (!p1) {
-    const other = S.notes.find(x => x.enc && x.enc.iv && x.id !== n.id);
-    if (other) {   // ya hay notas cifradas: se reutiliza su contraseña (la misma para todas)
-      p1 = await ask('Tu contraseña de las notas cifradas (la misma para todas)', '', 'password'); if (!p1) return;
-      try { await deriveKey(p1, unb64(other.enc.s)).then(k => crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(other.enc.iv) }, k, unb64(other.enc.d))); }
-      catch (e) { toast('No es la contraseña de tus otras notas cifradas'); return; }
-    } else {
-      p1 = await ask('Contraseña para tus notas (será la misma para todas las que cifres)', '', 'password'); if (!p1) return;
-      const p2 = await ask('Repite la contraseña', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return; }
-    }
-    sessionPw = p1;
-  }
+  const p1 = await masterPw(); if (!p1) return;
   const salt = crypto.getRandomValues(new Uint8Array(16));
   bioForget(n.id); n.enc = { s: b64(salt), iv: '', d: '' }; n._key = await deriveKey(p1, salt);
-  touch(); toast('Nota cifrada. No hay forma de recuperar la contraseña.'); drawEditor();
+  touch(); toast('Nota cifrada con la contraseña de tus notas'); drawEditor();
 }
 function noteText(n) {
   return (n.type === 'check' ? n.title + '\n' + n.items.map(i => (i.done ? '[x] ' : '[ ] ') + i.t).join('\n') : (n.type === 'text' ? n.body : (n.title + '\n' + n.body)));
@@ -1023,6 +1061,7 @@ function renderSettings() {
   item('Etiquetas', allLabels().length ? allLabels().length + ' etiqueta(s): renombrar, eliminar o ver sus notas' : 'Aún no hay etiquetas (se crean desde una nota)', () => manageLabels(true));
   sec('Seguridad');
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
+  item('Contraseña de las notas', pwvGet() ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla (una sola para todas las notas cifradas)', masterSetup);
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
   item('Recuperación de contraseñas', recOn() ? 'Configurada · clave partida en correo + WhatsApp/SMS' : 'No configurada', recoveryMenu);
   sec('Protección de los datos');
