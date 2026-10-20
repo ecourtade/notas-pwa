@@ -1,4 +1,4 @@
-const CACHE = 'notas-v4';
+const CACHE = 'notas-v5';
 const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'ne.js', 'lib/fflate.js', 'lib/sql-wasm.js', 'lib/sql-wasm.wasm', 'lib/ne_template.bin'];
 
 self.addEventListener('install', e => {

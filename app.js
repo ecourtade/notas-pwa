@@ -312,8 +312,7 @@ function renderMain() {
       el('span', { innerHTML: TYPE_ICON[n.type] }),
       el('div', { className: 'mid' }, el('div', { className: 't', textContent: noteTitle(n) }),
         (n.reminder || n.readonly) ? el('div', { className: 's', innerHTML: (n.reminder ? ic('bell') : '') + (n.readonly ? '<span>solo lectura</span>' : '') }) : null,
-        noteLabels(n).length ? el('div', { className: 'chips' }, noteLabels(n).slice(0, 4).map(l => labelChip(l, { onclick: e => { e.stopPropagation(); applyLabelFilter(l); } })), noteLabels(n).length > 4 ? el('span', { className: 'fnote', textContent: '+' + (noteLabels(n).length - 4) }) : null) : null),
-      el('div', { className: 'd', textContent: fmtDate(n.updated) }));
+        noteLabels(n).length ? el('div', { className: 'chips' }, noteLabels(n).slice(0, 4).map(l => labelChip(l, { onclick: e => { e.stopPropagation(); applyLabelFilter(l); } })), noteLabels(n).length > 4 ? el('span', { className: 'fnote', textContent: '+' + (noteLabels(n).length - 4) }) : null) : null));
     const guarded = n.enc && !S.selMode && longOpen();   // cifradas: solo se abren manteniendo pulsado 3 s
     pressable(row, guarded ? () => {} : () => noteTap(n), guarded ? () => { navigator.vibrate && navigator.vibrate(15); openNote(n); } : () => noteHold(n), guarded ? 3000 : 500);
     rows.push(row);

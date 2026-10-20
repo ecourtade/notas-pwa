@@ -17,6 +17,7 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0;wid
 
 #searchBar{padding:6px 10px;background:var(--panel)}
 #searchInput{border-bottom:2px solid var(--acc);padding:6px 2px}
+#searchInput::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none;width:32px;height:32px;margin-left:6px;cursor:pointer;background:center/20px 20px no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M5 5l14 14M19 5L5 19'/%3E%3C/svg%3E")}
 #folderBar{display:flex;align-items:center;gap:6px;padding:4px 8px;background:#555;color:#fff;font-size:.85rem;flex:none}
 #folderBar .ic{width:16px;height:16px}
 
