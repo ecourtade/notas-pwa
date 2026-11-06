@@ -1300,6 +1300,7 @@ async function syncDrive(opts) {
     syncLog({ down: m.applyLocal.length, del: m.delLocal.length, up: m.upload ? m.notes.length : 0, total: S.notes.length });
     if (!auto || m.applyLocal.length || m.delLocal.length) toast(`Sincronizado ✓  (↓${m.applyLocal.length} ↑${m.upload ? m.notes.length : 0})`);
     renderMain();
+    if (pref('bj_pending') === '1') runJsonBackup(false, true).catch(() => {});   // ya hay token: completa la copia pendiente en Drive
     if (!auto && !pref('gemail') && !pref('gemail_asked')) {   // sin correo la sincronización automática no puede entrar sola
       pref('gemail_asked', '1');
       const v = await ask('Para que la sincronización automática funcione al abrir la app, escribe el correo de tu cuenta de Google (puedes cambiarlo en Ajustes)', '', 'email');
@@ -1939,6 +1940,9 @@ async function runJsonBackup(force, auto) {
     if (dest.drive && !done.drive) {
       try {
         if (!navigator.onLine) throw new Error('offline');
+        // En segundo plano nunca se abre la ventana de Google (parpadeo, interrumpe la escritura y cierra el teclado):
+        // la copia a Drive queda pendiente hasta que haya un token válido (p. ej. tras tocar ⟳).
+        if (auto && !(gToken && Date.now() < gExp - 60000)) throw new Error('needtoken');
         await getToken(auto); await driveUploadJson(name, json); done.drive = true; save();
         try { await drivePruneJson(bj.keep); } catch (e) {}
       } catch (e) { err = e; }
@@ -1947,7 +1951,7 @@ async function runJsonBackup(force, auto) {
       pref('bj_last', String(Date.now())); pref('bj_try', ''); pref('bj_done', ''); pref('bj_pending', '0'); if (force) toast('Copia JSON guardada');
     } else {
       pref('bj_pending', '1');
-      if (err) {
+      if (err && err.message !== 'needtoken') {
         if (/popup|interaction|login_required|consent/i.test(err.message)) armBjTap();
         else if (force) toast(err.message === 'offline' ? 'Sin internet: la copia en Drive se hará en cuanto vuelva la conexión' : 'Copia JSON: ' + err.message);
       }
