@@ -39,7 +39,7 @@ const ICONS = {
 };
 const ic = n => `<svg class="ic" viewBox="0 0 24 24">${ICONS[n]}</svg>`;
 const setIcons = () => {
-  const map = { selTag: 'tag', searchFilter: 'filter', ckUndo: 'undo', ckRedo: 'redo', syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
+  const map = { selTag: 'tag', selRestore: 'undo', searchFilter: 'filter', ckUndo: 'undo', ckRedo: 'redo', syncBtn: 'sync', addBtn: 'plus', folderBtn: 'folder', searchBtn: 'search', moreBtn: 'more', selClose: 'close', selAll: 'selall', selMove: 'move', selDel: 'trash',
     edBack: 'back', edDel: 'trash', edShare: 'share', edInfo: 'info', edMore: 'more', findPrev: 'up', findNext: 'down', addItem: 'plus', addMic: 'mic', addSort: 'sort', fdBack: 'back', fdMore: 'more', stBack: 'back' };
   for (const [id, n] of Object.entries(map)) $(id).innerHTML = ic(n);
 };
@@ -324,6 +324,7 @@ function renderMain() {
   const sel = S.selMode;
   $('mainBar').hidden = sel; $('selBar').hidden = !sel;
   $('selCount').textContent = S.sel.size + ' seleccionadas';
+  $('selRestore').hidden = S.view.kind !== 'trash'; $('selTag').hidden = $('selMove').hidden = S.view.kind === 'trash';
   $('mainTitle').textContent = 'Audio Manager';
   $('folderBar').innerHTML = ic(S.view.kind === 'trash' ? 'trash' : 'folder');
   $('folderBar').append(' ' + viewName());
@@ -391,6 +392,7 @@ function mainMenu() {
     views().length ? { t: 'Vistas guardadas', fn: viewsMenu } : null,
     { t: 'Etiquetas…', fn: () => manageLabels(false) },
     S.view.kind === 'folder' ? { t: 'Nueva subcarpeta', fn: () => newFolder(S.view.id) } : null,
+    S.view.kind === 'trash' ? { t: 'Restaurar todas las notas de la papelera', fn: () => restoreFromTrash(S.notes.filter(n => n.deleted)) } : null,
     S.view.kind === 'trash' ? { t: 'Vaciar papelera', fn: emptyTrash } : null,
     '-', { t: 'Ajustes', fn: () => { renderSettings(); openScreen('settings'); } },
   ]);
@@ -404,13 +406,18 @@ async function emptyTrash() {
   const ts = S.notes.filter(n => n.deleted);
   if (!ts.length || !(await confirmD(`¿Eliminar definitivamente ${ts.length} notas?`))) return;
   for (const n of ts) await forgetNote(n.id);
-  S.notes = S.notes.filter(n => !n.deleted); renderMain();
+  S.notes = S.notes.filter(n => !n.deleted); markCount(); renderMain();
+}
+async function restoreFromTrash(ns) {
+  if (!ns.length) { toast('No hay notas que restaurar'); return; }
+  for (const n of ns) { n.deleted = null; await persist(n); }
+  markCount(); renderMain(); toast(`${ns.length} nota(s) restauradas`);
 }
 async function trashNotes(ns) {
   if (S.view.kind === 'trash') {
     if (!(await confirmD(`¿Eliminar definitivamente ${ns.length} nota(s)?`))) return;
     for (const n of ns) await forgetNote(n.id);
-    S.notes = S.notes.filter(n => !ns.includes(n));
+    S.notes = S.notes.filter(n => !ns.includes(n)); markCount();
   } else {
     for (const n of ns) { n.deleted = Date.now(); await persist(n); }
     toast(`${ns.length} nota(s) a la papelera`, 'Deshacer', async () => { for (const n of ns) { n.deleted = null; await persist(n); } renderMain(); });
@@ -1128,7 +1135,7 @@ function renderSettings() {
   item('Importar archivos de texto (.txt)', 'Uno o varios; cada archivo crea una nota', () => pickFile('.txt,text/plain', true, importTxt));
   item('Vaciar papelera', '', emptyTrash);
   sec('Sincronización');
-  item('Sincronización automática', pref('autosync') !== '0' ? 'Activada: al abrir la app y al volver a ella' : 'Desactivada: solo con el botón', () => { pref('autosync', pref('autosync') !== '0' ? '0' : '1'); renderSettings(); });
+  item('Sincronización automática', pref('autosync') !== '0' ? 'Activada: al abrir la app y al volver a ella' : 'Desactivada: Drive solo con el botón ⟳; las copias del teléfono siguen funcionando solas', () => { pref('autosync', pref('autosync') !== '0' ? '0' : '1'); renderSettings(); });
   item('Sincronizar ahora con Google Drive', pref('lastSync') ? 'Última vez: ' + fmtDate(+pref('lastSync')) : 'Aún no sincronizado', () => { history.back(); setTimeout(syncDrive, 300); });
   item('ID de cliente de Google', pref('gclient') ? 'Configurado' : 'Sin configurar (necesario para sincronizar)', async () => { await setClientId(false); renderSettings(); });
   item('Correo de Google para sincronizar', pref('gemail') || 'Sin indicar (se te preguntará la cuenta)', async () => { const v = await ask('Correo de la cuenta de Google', pref('gemail') || '', 'email'); if (v !== null) { pref('gemail', v.trim()); pref('gconsent', ''); gToken = null; renderSettings(); } });
@@ -1155,7 +1162,7 @@ async function applyBackupData(d, overwrite) {
     if (!raw || !raw.id) continue;
     const n = Object.assign(newNote(raw.type || 'text'), raw), old = S.notes.find(x => x.id === n.id);
     if (!overwrite && old && old.updated >= n.updated) continue;
-    if (overwrite) { n.updated = Date.now(); delete t['n:' + n.id]; }   // para que la sincronización propague la restauración
+    if (overwrite) delete t['n:' + n.id];   // se conserva la fecha de modificación original (si no, todas las notas quedarían con la fecha de la restauración y el orden se rompería)
     if (old) { S.notes[S.notes.indexOf(old)] = n; upd++; } else { S.notes.push(n); add++; }
     await DB.put('notes', n);
   }
@@ -1253,7 +1260,7 @@ async function gfetch(url, opts = {}) {
 const strip = n => { const o = {}; for (const k in n) if (k[0] !== '_') o[k] = n[k]; return o; };
 
 let syncing = false;
-function markCount() { pref('boot_count', String(S.notes.length)); }
+function markCount() { pref('boot_count', String(S.notes.length)); pref('boot_trash', String(S.notes.filter(n => n.deleted).length)); }
 function syncLog(e) { try { const l = JSON.parse(pref('synclog') || '[]'); l.push(Object.assign({ t: Date.now() }, e)); pref('synclog', JSON.stringify(l.slice(-25))); } catch (x) {} }
 async function syncDrive(opts) {
   const auto = !!(opts && opts.auto);                 // arranque automático: sin avisos molestos
@@ -1922,7 +1929,8 @@ function armBjTap() {
 async function runJsonBackup(force, auto) {
   if (bjRunning) return;
   if (!force && (!bj.on || !S.notes.length || Date.now() < nextDue(+pref('bj_last') || 0, bj.days, bj.time))) return;
-  const dest = { drive: bj.drive && !!pref('gclient') && !!pref('gconsent'), pc: bj.pc && !!(await folderHandle()), phone: bj.phone };
+  // Con la sincronización automática desactivada, la copia JSON automática no toca Drive (evita la pantalla de acceso y el aviso "pendiente"); a Drive se sube a mano.
+  const dest = { drive: bj.drive && !!pref('gclient') && !!pref('gconsent') && (force || pref('autosync') !== '0'), pc: bj.pc && !!(await folderHandle()), phone: bj.phone };
   if (!dest.drive && !dest.pc && !dest.phone) { if (force) toast('Elige dónde guardar la copia: Google Drive, el teléfono (Descargas) o una carpeta del PC'); return; }
   bjRunning = true;
   try {
@@ -1994,7 +2002,7 @@ function updateSyncStat() {
   else if (err) { t = '⚠ La última sincronización falló' + (last ? ' · última correcta: ' + fmtDate(last) : ''); cls = 'warn'; }
   else if (!navigator.onLine && S.dirty) { t = '⏳ Sin conexión: se sincronizará al volver' + (last ? ' · última: ' + fmtDate(last) : ''); cls = 'warn'; }
   else t = last ? '☁ Última sincronización: ' + fmtDate(last) : '☁ Sin sincronizar todavía';
-  if (pref('bj_pending') === '1' && bj.on) t += ' · copia JSON pendiente';
+  if (pref('bj_pending') === '1' && bj.on && pref('autosync') !== '0') t += ' · copia JSON pendiente';
   e.textContent = t; e.className = cls;
 }
 
@@ -2211,6 +2219,7 @@ function wire() {
   $('searchFilter').onclick = filterDialog;
   $('selTag').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id)); if (await labelsDialog(ns)) endSel(); };
   $('selAll').onclick = () => { visibleNotes().forEach(n => S.sel.add(n.id)); renderMain(); };
+  $('selRestore').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id) && n.deleted); endSel(); await restoreFromTrash(ns); };
   $('selDel').onclick = async () => { const ns = S.notes.filter(n => S.sel.has(n.id)); endSel(); await trashNotes(ns); renderMain(); };
   $('selMove').onclick = async () => { const f = await pickFolder(true); if (!f) return; for (const n of S.notes.filter(n => S.sel.has(n.id))) { n.folder = f; await persist(n); } endSel(); toast('Notas movidas a ' + folderName(f)); };
 
@@ -2261,6 +2270,20 @@ function wire() {
   addEventListener('pagehide', () => { flush().catch(() => {}); if (!window.__dropPending) markCount(); });
 }
 
+// Notas con más de TRASH_DAYS días en la papelera: nunca se borran solas; se pregunta (como mucho una vez al día).
+async function askExpiredTrash() {
+  const lim = Date.now() - TRASH_DAYS * 864e5, old = S.notes.filter(n => n.deleted && n.deleted < lim);
+  if (!old.length || Date.now() - (+pref('trash_ask') || 0) < 864e5) return;
+  pref('trash_ask', String(Date.now()));
+  const r = await dialog('Papelera', el('p', { textContent: `${old.length} nota(s) llevan más de ${TRASH_DAYS} días en la papelera.\n\nNo se borran solas: tú decides. Puedes revisarlas y restaurar las que quieras antes de eliminar.` }),
+    [{ t: 'Ahora no', v: 0 }, { t: 'Ver papelera', v: 1 }, { t: 'Eliminar ' + old.length, v: 2 }]);
+  if (r === 1) { S.view = { kind: 'trash', id: null }; renderMain(); }
+  else if (r === 2 && await confirmD(`¿Eliminar definitivamente ${old.length} nota(s)? No se puede deshacer.`)) {
+    for (const n of old) await forgetNote(n.id);
+    S.notes = S.notes.filter(n => !old.includes(n)); markCount(); renderMain(); toast(old.length + ' nota(s) eliminadas');
+  }
+}
+
 async function init() {
   S.bioNotes = new Set();
   wire(); setupEq();
@@ -2275,17 +2298,21 @@ async function init() {
     S.recovery = metas.find(m => m.id === 'recovery') || null;
     await mirInit();
     if (!S.folders.some(f => f.id === 'main')) { const m = { id: 'main', name: 'Carpeta principal', parent: null }; S.folders.push(m); await DB.put('folders', m); }
-    const lim = Date.now() - TRASH_DAYS * 864e5;
-    for (const n of S.notes.filter(n => n.deleted && n.deleted < lim)) await forgetNote(n.id);
-    S.notes = S.notes.filter(n => !n.deleted || n.deleted >= lim);
+    // La papelera ya NO se purga sola: si hay notas con más de TRASH_DAYS días, se pregunta (ver askExpiredTrash).
     const prevCount = +pref('boot_count') || 0, nowCount = S.notes.length;
+    const prevTrash = pref('boot_trash') === null || pref('boot_trash') === '' ? null : +pref('boot_trash'), nowTrash = S.notes.filter(n => n.deleted).length;
     if (prevCount - nowCount >= 10) {
-      syncLog({ drop: prevCount - nowCount, prev: prevCount, now: nowCount }); window.__dropPending = true;
+      syncLog({ drop: prevCount - nowCount, prev: prevCount, now: nowCount, trash: prevTrash === null ? undefined : prevTrash - nowTrash }); window.__dropPending = true;
+      const liveDrop = prevTrash === null ? null : (prevCount - prevTrash) - (nowCount - nowTrash);
+      const porPapelera = liveDrop !== null && liveDrop <= 0 && prevTrash - nowTrash >= 10;
+      const txt = porPapelera
+        ? `Hay ${prevCount - nowCount} notas menos que la última vez (antes ${prevCount}, ahora ${nowCount}).\n\nLa diferencia se debe al vaciado de la papelera: se eliminaron definitivamente ${prevTrash - nowTrash} notas que estaban en ella (papelera: antes ${prevTrash}, ahora ${nowTrash}). Las notas fuera de la papelera no cambiaron.\n\nSi no fuiste tú, pulsa "Ver copias" para recuperarlas de una copia interna.`
+        : `Hay ${prevCount - nowCount} notas menos que la última vez que cerraste la app (antes ${prevCount}, ahora ${nowCount}).` + (liveDrop !== null ? `\nNotas fuera de la papelera: ${liveDrop > 0 ? liveDrop + ' menos' : 'sin cambios'}. Papelera: antes ${prevTrash}, ahora ${nowTrash}.` : '') + `\n\nPuede que el navegador haya borrado datos o que alguna operación las haya quitado. Tus notas pueden estar en una copia de seguridad, en Google Drive o en el ZIP original.\n\nPulsa "Ver copias" para restaurar una copia interna.`;
       setTimeout(async () => {
-        const r = await dialog('Faltan notas', el('p', { textContent: `Hay ${prevCount - nowCount} notas menos que la última vez que cerraste la app (antes ${prevCount}, ahora ${nowCount}).\n\nPuede que el navegador haya borrado datos o que alguna operación las haya quitado. Tus notas pueden estar en una copia de seguridad, en Google Drive o en el ZIP original.\n\nPulsa "Ver copias" para restaurar una copia interna.` }), [{ t: 'Cerrar', v: 0 }, { t: 'Ver copias', v: 1 }]);
-        window.__dropPending = false; markCount(); if (r === 1) backupsMenu();
+        const r = await dialog(porPapelera ? 'Papelera vaciada' : 'Faltan notas', el('p', { textContent: txt }), [{ t: 'Cerrar', v: 0 }, { t: 'Ver copias', v: 1 }]);
+        window.__dropPending = false; markCount(); if (r === 1) backupsMenu(); else askExpiredTrash();
       }, 800);
-    } else markCount();
+    } else { markCount(); setTimeout(askExpiredTrash, 1500); }
   } catch (e) { toast('Error al abrir el almacenamiento: ' + e.message); }
   renderMain();
   mirCheck();
