@@ -7,3 +7,15 @@ Credenciales*
 
 # Memoria del proyecto: repositorio privado aparte, clonado en docs/
 docs/
+
+# App Android (Capacitor): no subir dependencias ni compilados; www se regenera con sync-web.js
+android-app/node_modules/
+android-app/www/
+android-app/android/local.properties
+android-app/android/.gradle/
+android-app/android/build/
+android-app/android/app/build/
+android-app/android/capacitor-cordova-android-plugins/
+android-app/android/app/src/main/assets/public/
+android-app/android/app/src/main/assets/capacitor.config.json
+android-app/android/app/src/main/assets/capacitor.plugins.json

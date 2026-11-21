@@ -1,0 +1,7 @@
+{
+  "appId": "com.ecourtade.audiomanager",
+  "appName": "Audio Manager",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "android": { "allowMixedContent": false }
+}
