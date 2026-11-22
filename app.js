@@ -139,6 +139,7 @@ async function decryptWith(n, key) {
 }
 let sessionPw = null;   // contraseña única de las notas: solo en memoria, se pide una vez por sesión
 async function unlock(n) {
+  if (n.prot && !n.enc) return gateAuth();
   if (!n.enc || n._key) return true;
   if (!crypto.subtle) { toast('El cifrado requiere HTTPS'); return false; }
   if (sessionPw) { try { await decryptWith(n, await deriveKey(sessionPw, unb64(n.enc.s))); return true; } catch (e) {} }
@@ -206,9 +207,106 @@ async function masterSetup() {
   toast(`Contraseña cambiada en ${done} nota(s)` + (skipped ? `; ${skipped} tenían otra contraseña y no se tocaron` : ''));
 }
 
+/* ============ Notas ocultas con contraseña de acceso (sin cifrado) ============ */
+// Las notas "protegidas" (n.prot) se guardan SIN cifrar: la app pide una contraseña de acceso (o la huella) para abrirlas.
+// La contraseña de acceso viaja con las notas (sincronización y copias) como S.gate = { s, h, created, email }.
+// Si se olvida: inicio de sesión en Google (la misma cuenta) + verificación del teléfono (huella/PIN/patrón) y se elige otra.
+const isProt = n => !!(n.prot || n.enc);
+let gateSess = false;   // acceso concedido en esta sesión (se cierra con el bloqueo de la app)
+async function gateSet(pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), email = (pref('gemail') || '').trim().toLowerCase() || (S.gate && S.gate.email) || undefined;
+  S.gate = { s: b64(salt), h: await hashPin(pw, salt), created: Date.now(), email };
+  await DB.put('meta', Object.assign({ id: 'gate' }, S.gate)); gateSess = true; S.dirty = true; scheduleSync();
+}
+async function askNewPassword(title) {
+  const p1 = await ask(title, '', 'password'); if (!p1) return null;
+  if (p1.length < 4) { toast('Usa al menos 4 caracteres'); return null; }
+  const p2 = await ask('Repite la contraseña', '', 'password'); if (p1 !== p2) { toast('Las contraseñas no coinciden'); return null; }
+  return p1;
+}
+async function gateCreate() {
+  if (!crypto.subtle) { toast('Requiere HTTPS'); return false; }
+  await info('Contraseña de acceso', 'Se pedirá para abrir tus notas ocultas. Las notas no se cifran. Si la olvidas, podrás elegir otra iniciando sesión con tu cuenta de Google y verificando con la huella o el PIN del teléfono (para eso, deja configurado tu correo de Google en Ajustes).');
+  const p = await askNewPassword('Elige la contraseña de acceso'); if (!p) return false;
+  await gateSet(p); toast('Contraseña guardada'); return true;
+}
+async function gateForgot() {
+  const expected = ((S.gate && S.gate.email) || pref('gemail') || '').trim().toLowerCase();
+  if (!pref('gclient') || !expected) { await info('No se puede recuperar', 'Para recuperarla hace falta tener configurados el ID de cliente de Google y tu correo en Ajustes. Se hace una sola vez, antes de olvidar la contraseña.'); return false; }
+  if (!(await confirmD(`Para elegir una contraseña nueva iniciarás sesión con tu cuenta de Google (${expected}) y confirmarás con la huella, el PIN o el patrón del teléfono. ¿Continuar?`))) return false;
+  try {
+    await getToken(false, true);
+    const me = await (await gfetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)')).json();
+    if (((me.user && me.user.emailAddress) || '').toLowerCase() !== expected) { toast('Esa cuenta de Google no es la de esta app'); return false; }
+  } catch (e) { toast('No se pudo iniciar sesión en Google: ' + (e.message || e)); return false; }
+  if (!(await recVerify())) return false;
+  const p = await askNewPassword('Elige la contraseña nueva'); if (!p) return false;
+  await gateSet(p); toast('Contraseña nueva guardada'); return true;
+}
+async function gateAuth() {
+  if (gateSess) return true;
+  if (!S.gate) return gateCreate();
+  if (pref('gate_bio') === '1' && await bio.available()) { try { await bio.assert(false); gateSess = true; return true; } catch (e) { /* se pide la contraseña */ } }
+  for (;;) {
+    const inp = el('input', { type: 'password' });
+    setTimeout(() => inp.focus(), 50); inp.onkeydown = e => { if (e.key === 'Enter') $('overlay').querySelector('.btns button:last-child').click(); };
+    const r = await dialog('Contraseña', inp, [{ t: 'Cancelar', v: null }, { t: 'Olvidé la contraseña', v: 'forgot' }, { t: 'Aceptar', v: true }]);
+    if (r === null) return false;
+    if (r === 'forgot') { if (await gateForgot()) return true; continue; }
+    if ((await hashPin(inp.value, unb64(S.gate.s))) === S.gate.h) { gateSess = true; setTimeout(offerGateBio, 400); return true; }
+    toast('Contraseña incorrecta');
+  }
+}
+async function offerGateBio() {
+  if (pref('gate_bio') === '1' || pref('bio_offer') === '0' || !(await bio.available())) return;
+  const r = await dialog('¿Abrir con el teléfono?', el('p', { textContent: 'La próxima vez podrás entrar con tu huella (o el patrón/PIN del teléfono) en lugar de escribir la contraseña.' }), [{ t: 'No preguntar más', v: 'never' }, { t: 'Ahora no', v: null }, { t: 'Activar', v: 'ok' }]);
+  if (r === 'never') pref('bio_offer', '0'); else if (r === 'ok') await gateBioToggle(true);
+}
+async function gateBioToggle(on) {
+  if (!on && pref('gate_bio') === '1') { pref('gate_bio', '0'); toast('Desactivado'); return; }
+  if (!(await bio.available())) { toast('Este dispositivo no ofrece huella'); return; }
+  try { if (!bio.cred) await bio.register(); await bio.assert(false); pref('gate_bio', '1'); toast('Activado'); }
+  catch (e) { if (e.name !== 'NotAllowedError') toast('No se pudo activar'); }
+}
+async function gateChange() {
+  if (!S.gate) { if (await gateCreate()) renderSettings(); return; }
+  if (!(await gateAuth())) return;
+  const p = await askNewPassword('Contraseña de acceso nueva'); if (!p) return;
+  await gateSet(p); toast('Contraseña cambiada'); renderSettings();
+}
+async function toggleProt() {
+  const n = S.cur; if (!n) return;
+  if (n.prot) { if (!(await confirmD('¿Quitar la protección? La nota volverá a la lista normal.'))) return; n.prot = false; touch(); toast('Protección quitada'); drawEditor(); return; }
+  if (!S.gate && !(await gateCreate())) return;
+  n.prot = true; touch(); toast('Nota protegida: está en la lista oculta'); drawEditor();
+}
+// Convierte las notas cifradas antiguas en notas protegidas (sin cifrar), leyéndolas con la huella/contraseña actual.
+async function gateMigrate() {
+  const encs = S.notes.filter(n => n.enc);
+  if (!encs.length) { toast('No hay notas cifradas'); return; }
+  if (!(await confirmD(`Se quitará el cifrado de ${encs.length} nota(s): quedarán legibles en este dispositivo, en Drive y en las copias, y se abrirán con la contraseña de acceso. Para leerlas se te pedirá la huella (o el PIN) del teléfono. Antes se guarda una copia interna. ¿Continuar?`))) return;
+  await runBackup(true, true);
+  if (!sessionPw) await masterBioGet();
+  let ok = 0, fail = 0;
+  for (const n of encs) {
+    try {
+      if (!n._key) {
+        let done = false;
+        if (sessionPw) { try { await decryptWith(n, await deriveKey(sessionPw, unb64(n.enc.s))); done = true; } catch (e) {} }
+        if (!done) done = await bioUnlock(n);
+        if (!done) throw new Error('sin clave');
+      }
+      n.enc = null; n.prot = true; delete n._key; await bioForget(n.id); n.updated = Date.now(); await persist(n); ok++;
+    } catch (e) { fail++; }
+  }
+  if (ok && !S.gate) { const p = await askNewPassword('Elige la contraseña de acceso a tus notas ocultas'); if (p) await gateSet(p); else toast('Pendiente: crea la contraseña en Ajustes'); }
+  renderSettings(); renderMain();
+  await info('Conversión terminada', `Convertidas: ${ok}` + (fail ? `\nNo se pudieron leer: ${fail} (siguen cifradas; ábrelas con su contraseña o con "Olvidé la contraseña")` : '') + '\n\nSincroniza con ⟳ para actualizar Drive.');
+}
+
 /* ============ Estado ============ */
 const S = {
-  notes: [], folders: [], view: { kind: 'all', id: null }, q: '', vq: '', sel: new Set(), selMode: false,
+  gate: null, notes: [], folders: [], view: { kind: 'all', id: null }, q: '', vq: '', sel: new Set(), selMode: false,
   cur: null, stack: ['main'], tab: 'all', find: null,
 };
 const settings = {
@@ -258,7 +356,11 @@ const inVault = () => S.stack.includes('vault');
 const curQ = () => inVault() ? S.vq : S.q;
 function syncSearchUI() { $('searchInput').value = curQ(); $('searchBar').hidden = !curQ(); }
 let vaultBusy = false;
-async function vaultAuth() {   // huella / patrón / PIN del teléfono (válido para todas las notas); si no, contraseña de las notas; si no, PIN de la app
+async function vaultAuth() {
+  if (!S.gate && S.notes.some(n => n.enc)) return vaultAuthLegacy();   // aún sin convertir las notas cifradas antiguas
+  return gateAuth();
+}
+async function vaultAuthLegacy() {   // huella / patrón / PIN del teléfono (válido para todas las notas); si no, contraseña de las notas; si no, PIN de la app
   if (await masterBioGet()) return true;
   for (;;) {
     if (pwvGet()) {
@@ -300,9 +402,9 @@ function visibleNotes() {
   const tagQ = toks.filter(t => t[0] === '#' && t.length > 1).map(t => t.slice(1)), q = toks.filter(t => t[0] !== '#').join(' ');
   const searching = !!(q || tagQ.length), scopeAll = v.kind === 'all' || (f.allFolders && v.kind === 'folder');
   let ns = S.notes.filter(n => {
-    if (vault) return !n.deleted && !!n.enc;
+    if (vault) return !n.deleted && isProt(n);
     if (v.kind === 'trash') return !!n.deleted;
-    if (n.deleted || n.enc) return false;
+    if (n.deleted || isProt(n)) return false;
     if (searching) return true;
     return scopeAll || n.folder === v.id;
   });
@@ -507,7 +609,7 @@ function openLink(l) {
 async function openWiki(name) {
   await flush();
   const low = name.trim().toLowerCase();
-  let t = S.notes.find(n => !n.deleted && !n.enc && n.type !== 'check' && noteTitle(n).toLowerCase() === low);
+  let t = S.notes.find(n => !n.deleted && !isProt(n) && n.type !== 'check' && noteTitle(n).toLowerCase() === low);
   if (!t) { t = newNote('text', S.cur ? S.cur.folder : 'main'); t.body = name + '\n'; await persist(t); }
   openNote(t, false, true);
 }
@@ -1009,7 +1111,7 @@ function editorMenu() {
     { t: 'Color de la nota…', fn: colorDialog },
     { t: n.readonly ? 'Desactivar solo lectura' : 'Solo lectura', fn: () => { n.readonly = !n.readonly; touch(); drawEditor(); } },
     { t: n.reminder ? 'Recordatorio: ' + fmtDate(n.reminder) + ' (cambiar)' : 'Añadir recordatorio', fn: reminderDialog },
-    { t: n.enc ? 'Quitar cifrado' : 'Cifrar con contraseña', fn: toggleEncrypt },
+    n.enc ? { t: 'Quitar cifrado', fn: toggleEncrypt } : { t: n.prot ? 'Quitar protección' : 'Proteger con contraseña', fn: toggleProt },
     n.enc ? { t: S.bioNotes.has(n.id) ? 'Quitar la huella de esta nota' : 'Abrir esta nota con huella', fn: () => toggleNoteBio(n) } : null,
     '-', { t: 'Mover a carpeta…', fn: async () => { const f = await pickFolder(true); if (f) { n.folder = f; touch(); toast('Movida a ' + folderName(f)); } } },
     { t: 'Duplicar', fn: async () => { const c = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(n).filter(([k]) => k[0] !== '_')))); c.id = uid(); c.created = c.updated = Date.now(); c.enc = n.enc ? null : null; await persist(c); toast('Nota duplicada'); } },
@@ -1085,7 +1187,7 @@ function printNote() {
 async function noteInfo() {
   const n = S.cur;
   const len = n.type === 'check' ? n.items.length + ' elementos' : n.body.length + ' caracteres';
-  await info('Información', `Título: ${noteTitle(n)}\nTipo: ${TYPE_NAME[n.type]}\nCarpeta: ${folderName(n.folder)}\nCreada: ${fmtDate(n.created)}\nModificada: ${fmtDate(n.updated)}\nTamaño: ${len}${n.enc ? '\nCifrada: sí' : ''}${n.reminder ? '\nRecordatorio: ' + fmtDate(n.reminder) : ''}`);
+  await info('Información', `Título: ${noteTitle(n)}\nTipo: ${TYPE_NAME[n.type]}\nCarpeta: ${folderName(n.folder)}\nCreada: ${fmtDate(n.created)}\nModificada: ${fmtDate(n.updated)}\nTamaño: ${len}${n.enc ? '\nCifrada: sí' : n.prot ? '\nProtegida con contraseña: sí' : ''}${n.reminder ? '\nRecordatorio: ' + fmtDate(n.reminder) : ''}`);
 }
 
 /* ============ Ajustes, copias e importación ============ */
@@ -1099,9 +1201,12 @@ function renderSettings() {
   item('Etiquetas', allLabels().length ? allLabels().length + ' etiqueta(s): renombrar, eliminar o ver sus notas' : 'Aún no hay etiquetas (se crean desde una nota)', () => manageLabels(true));
   sec('Seguridad');
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
-  item('Contraseña de las notas', pwvGet() ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla (una sola para todas las notas cifradas)', masterSetup);
+  item('Contraseña de acceso a las notas ocultas', S.gate ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla', gateChange);
+  item('Abrir las notas ocultas con la huella', pref('gate_bio') === '1' ? 'Activado' : 'Desactivado', () => gateBioToggle(pref('gate_bio') !== '1').then(renderSettings));
+  if (S.notes.some(n => n.enc)) item('Convertir las notas cifradas antiguas', S.notes.filter(n => n.enc).length + ' nota(s) cifradas · quita el cifrado y las protege solo con la contraseña de acceso', gateMigrate);
+  if (S.notes.some(n => n.enc)) item('Contraseña de las notas cifradas (antigua)', pwvGet() ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla (una sola para todas las notas cifradas)', masterSetup);
   item('Huella de este dispositivo', bio.cred ? `Registrada · ${S.bioNotes.size} nota(s) cifrada(s) con huella` : 'No registrada (se registra al activarla en una nota o en el bloqueo)', bio.cred ? removeBio : () => toast('Se registra al activar la huella'));
-  item('Recuperación de contraseñas', recOn() ? (S.recovery.mode === 'drive' ? 'Configurada · con tu cuenta de Google' : 'Configurada · clave partida (método antiguo)') : 'No configurada', recoveryMenu);
+  if (S.notes.some(n => n.enc) || recOn()) item('Recuperación de contraseñas (antigua)', recOn() ? (S.recovery.mode === 'drive' ? 'Configurada · con tu cuenta de Google' : 'Configurada · clave partida (método antiguo)') : 'No configurada', recoveryMenu);
   sec('Protección de los datos');
   item('Carpeta espejo (recomendado)', dirSupported() ? (mir.dir ? 'Activa: ' + mir.dir.name + ' — copia viva fuera del navegador' : 'No configurada: guarda cada nota como archivo en una carpeta de tu dispositivo') : 'Este navegador no permite elegir carpetas', mirrorMenu);
   const freq = (key, cur) => () => menu([1, 2, 3, 7].map(d => ({ t: d === 1 ? 'Cada día' : `Cada ${d} días`, fn: () => { pref(key, String(d)); renderSettings(); } })));
@@ -1149,7 +1254,7 @@ function pickFile(accept, multiple, fn) {
   f.onchange = () => { const files = [...f.files]; f.value = ''; if (files.length) fn(files); }; f.click();
 }
 function exportBackup() {
-  const data = { app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes, recovery: S.recovery || undefined };
+  const data = { app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes, recovery: S.recovery || undefined, gate: S.gate || undefined };
   download(`notas-copia-${new Date().toISOString().slice(0, 10)}.json`, new Blob([JSON.stringify(data, (k, v) => (k[0] === '_' ? undefined : v))], { type: 'application/json' }));
 }
 // overwrite=true: restaurar (la copia manda); false: fusionar (gana la más reciente)
@@ -1157,6 +1262,7 @@ async function applyBackupData(d, overwrite) {
   if (!d || !Array.isArray(d.notes)) throw new Error('copia no válida');
   let add = 0, upd = 0; const t = tombs();
   if (d.recovery) { const pk = pickRecovery(S.recovery, d.recovery); if (pk !== S.recovery) await setRecovery(pk); }
+  if (d.gate) { const pg = pickRecovery(S.gate, d.gate); if (pg !== S.gate) { S.gate = pg; await DB.put('meta', Object.assign({ id: 'gate' }, pg)); } }
   for (const f of d.folders || []) if (f.id && !folderById(f.id)) { S.folders.push(f); await DB.put('folders', f); }
   for (const raw of d.notes) {
     if (!raw || !raw.id) continue;
@@ -1274,12 +1380,15 @@ async function syncDrive(opts) {
     const list = await (await gfetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id)`)).json();
     const fid = list.files && list.files[0] && list.files[0].id;
     let R = { notes: [], folders: [], tomb: {} };
-    if (fid) { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json(); R = { notes: d.notes || [], folders: d.folders || [], tomb: d.tomb || {}, recovery: d.recovery || null }; }
+    if (fid) { const d = await (await gfetch(`https://www.googleapis.com/drive/v3/files/${fid}?alt=media`)).json(); R = { notes: d.notes || [], folders: d.folders || [], tomb: d.tomb || {}, recovery: d.recovery || null, gate: d.gate || null }; }
     const L = { notes: S.notes.map(strip), folders: S.folders, tomb: tombs() };
     const m = mergeData(L, R);
     const pickRec = pickRecovery(S.recovery, R.recovery);          // la configuración de recuperación viaja con las notas
     if (pickRec !== S.recovery) await setRecovery(pickRec);
     if (pickRec && pickRec !== R.recovery) m.upload = true;
+    const pickG = pickRecovery(S.gate, R.gate);                    // la contraseña de acceso viaja con las notas
+    if (pickG !== S.gate) { S.gate = pickG; if (pickG) await DB.put('meta', Object.assign({ id: 'gate' }, pickG)); }
+    if (pickG && pickG.created !== (R.gate || {}).created) m.upload = true;
     const mass = m.delLocal.length >= 10 && m.delLocal.length > S.notes.length * 0.1;
     if (mass) {
       syncLog({ blocked: m.delLocal.length });
@@ -1295,7 +1404,7 @@ async function syncDrive(opts) {
     for (const id of m.delFolders) { S.folders = S.folders.filter(x => x.id !== id); await DB.del('folders', id); }
     saveTombs(m.tomb);
     if (m.upload || !fid) {
-      const body = JSON.stringify({ app: 'notas', version: 2, saved: Date.now(), notes: m.notes.map(strip), folders: m.folders, tomb: m.tomb, recovery: pickRec || undefined });
+      const body = JSON.stringify({ app: 'notas', version: 2, saved: Date.now(), notes: m.notes.map(strip), folders: m.folders, tomb: m.tomb, recovery: pickRec || undefined, gate: pickG || undefined });
       if (fid) await gfetch(`https://www.googleapis.com/upload/drive/v3/files/${fid}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
       else {
         const bd = 'nb' + Date.now();
@@ -1411,7 +1520,7 @@ const bk = {
 const dirSupported = () => 'showDirectoryPicker' in window;
 const pad2 = n => String(n).padStart(2, '0');
 const stamp = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}-${pad2(d.getMinutes())}`;
-const backupJSON = () => JSON.stringify({ app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes.map(strip), tomb: tombs(), recovery: S.recovery || undefined }, (k, v) => (k[0] === '_' ? undefined : v));
+const backupJSON = () => JSON.stringify({ app: 'notas', version: 2, exported: Date.now(), folders: S.folders, notes: S.notes.map(strip), tomb: tombs(), recovery: S.recovery || undefined, gate: S.gate || undefined }, (k, v) => (k[0] === '_' ? undefined : v));
 async function gzip(text) { const st = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip')); return new Response(st).blob(); }
 async function gunzipText(blob) { const st = blob.stream().pipeThrough(new DecompressionStream('gzip')); return new Response(st).text(); }
 
@@ -1589,7 +1698,7 @@ async function verifyCurrentPin() {
   if (await checkPin(p)) return true; toast('PIN incorrecto'); return false;
 }
 function showLock() {
-  sessionPw = null;
+  sessionPw = null; gateSess = false;
   if (!lock.on || lock.shown) return; lock.shown = true;
   $('lockScreen').hidden = false; $('lockPin').value = ''; $('lockMsg').textContent = ''; $('lockBio').hidden = !lock.bio;
   setTimeout(() => { $('lockPin').focus(); if (lock.bio) lockWithBio(true); }, 150);
@@ -2107,7 +2216,7 @@ function matchesFilter(n) {
   if (f.types.length && !f.types.includes(n.type)) return false;
   if (f.colors.length && !f.colors.includes(n.color || '')) return false;
   if (f.reminder && !n.reminder) return false;
-  if (f.enc && !n.enc) return false;
+  if (f.enc && !isProt(n)) return false;
   if (f.readonly && !n.readonly) return false;
   if (f.range) { const [a, b] = rangeBounds(f); if (n.updated < a || n.updated > b) return false; }
   return true;
@@ -2128,7 +2237,7 @@ async function filterDialog() {
   sec('Color de la nota'); const rc = el('div');
   NOTE_COLORS.forEach(c => { const b = chip(rc, c ? '' : 'Sin color', () => d.colors.includes(c), () => toggleIn(d.colors, c)); if (c) b.style.cssText = `background:${c};min-width:34px;height:30px;padding:0`; }); wrap.append(rc);
   sec('Estado'); const rs = el('div');
-  chip(rs, 'Con recordatorio', () => d.reminder, () => { d.reminder = !d.reminder; }); chip(rs, 'Cifradas', () => d.enc, () => { d.enc = !d.enc; }); chip(rs, 'Solo lectura', () => d.readonly, () => { d.readonly = !d.readonly; });
+  chip(rs, 'Con recordatorio', () => d.reminder, () => { d.reminder = !d.reminder; }); chip(rs, 'Protegidas', () => d.enc, () => { d.enc = !d.enc; }); chip(rs, 'Solo lectura', () => d.readonly, () => { d.readonly = !d.readonly; });
   if (S.view.kind === 'folder') chip(rs, 'Incluir todas las carpetas', () => d.allFolders, () => { d.allFolders = !d.allFolders; });
   wrap.append(rs);
   sec('Modificadas'); const sel = el('select', {}, RANGES.map(([v, t]) => el('option', { value: v, textContent: t, selected: d.range === v })));
@@ -2165,7 +2274,7 @@ function renderFilterBar() {
   for (const t of f.types) add(el('span', { className: 'fchip on', textContent: TYPE_NAME[t] + ' ✕' }), () => toggleIn(f.types, t));
   for (const c of f.colors) { const s = el('span', { className: 'fchip on', textContent: c ? '● ✕' : 'Sin color ✕' }); if (c) s.style.color = c; add(s, () => toggleIn(f.colors, c)); }
   if (f.reminder) add(el('span', { className: 'fchip on', textContent: 'Recordatorio ✕' }), () => { f.reminder = false; });
-  if (f.enc) add(el('span', { className: 'fchip on', textContent: 'Cifradas ✕' }), () => { f.enc = false; });
+  if (f.enc) add(el('span', { className: 'fchip on', textContent: 'Protegidas ✕' }), () => { f.enc = false; });
   if (f.readonly) add(el('span', { className: 'fchip on', textContent: 'Solo lectura ✕' }), () => { f.readonly = false; });
   if (f.range) add(el('span', { className: 'fchip on', textContent: (RANGES.find(r => r[0] === f.range) || ['', ''])[1] + ' ✕' }), () => { f.range = ''; });
   if (f.allFolders) parts.push(el('span', { className: 'fnote', textContent: 'todas las carpetas' }));
@@ -2296,6 +2405,7 @@ async function init() {
     const metas = await metaAll();
     S.bioNotes = new Set(metas.filter(m => m.id.startsWith('bio:')).map(m => m.id.slice(4)));
     S.recovery = metas.find(m => m.id === 'recovery') || null;
+    S.gate = metas.find(m => m.id === 'gate') || null;
     await mirInit();
     if (!S.folders.some(f => f.id === 'main')) { const m = { id: 'main', name: 'Carpeta principal', parent: null }; S.folders.push(m); await DB.put('folders', m); }
     // La papelera ya NO se purga sola: si hay notas con más de TRASH_DAYS días, se pregunta (ver askExpiredTrash).

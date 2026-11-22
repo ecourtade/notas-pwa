@@ -138,7 +138,7 @@ async function neExport() {
     const prio = c => +Object.keys(NE.PRIO_COLOR).find(k => NE.PRIO_COLOR[k] === c) || 0;
     const sk = { enc: 0, nomedia: 0 }; let count = 0;
     for (const n of S.notes) {
-      if (n.enc) { sk.enc++; continue; }
+      if (n.enc || n.prot) { sk.enc++; continue; }
       const nid = id++, folder = n.deleted ? NE.TRASH : folderPath(n.folder), pr = prio(n.color);
       let type = 0, uri = null, title = noteTitle(n), body = n.body || '', cso = -1;
       if (n.type === 'check') {
