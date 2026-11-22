@@ -213,10 +213,23 @@ async function masterSetup() {
 // Si se olvida: inicio de sesión en Google (la misma cuenta) + verificación del teléfono (huella/PIN/patrón) y se elige otra.
 const isProt = n => !!(n.prot || n.enc);
 let gateSess = false;   // acceso concedido en esta sesión (se cierra con el bloqueo de la app)
-async function gateSet(pw) {
+const genCode = () => b32enc(crypto.getRandomValues(new Uint8Array(10))).match(/.{1,4}/g).join('-');   // 16 caracteres (80 bits)
+const normCode = c => String(c || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+async function gateSet(pw, keepCode) {
   const salt = crypto.getRandomValues(new Uint8Array(16)), email = (pref('gemail') || '').trim().toLowerCase() || (S.gate && S.gate.email) || undefined;
-  S.gate = { s: b64(salt), h: await hashPin(pw, salt), created: Date.now(), email };
+  let rs = keepCode && S.gate && S.gate.rs, rh = keepCode && S.gate && S.gate.rh, code = null;
+  if (!rh) { code = genCode(); const r = crypto.getRandomValues(new Uint8Array(16)); rs = b64(r); rh = await hashPin(normCode(code), r); }
+  S.gate = { s: b64(salt), h: await hashPin(pw, salt), created: Date.now(), email, rs, rh };
   await DB.put('meta', Object.assign({ id: 'gate' }, S.gate)); gateSess = true; S.dirty = true; scheduleSync();
+  if (code) await showRecoveryCode(code);
+}
+const showRecoveryCode = code => info('Código de recuperación', 'Guárdalo en un lugar seguro (tu gestor de contraseñas, o un correo a ti mismo). Con él podrás elegir una contraseña nueva si la olvidas. Solo se muestra ahora y no se puede volver a ver (si lo pierdes, genera otro en Ajustes).\n\n' + code);
+async function gateNewCode() {
+  if (!S.gate || !(await gateAuth())) return;
+  const code = genCode(), r = crypto.getRandomValues(new Uint8Array(16));
+  S.gate = Object.assign({}, S.gate, { rs: b64(r), rh: await hashPin(normCode(code), r), created: Date.now() });
+  await DB.put('meta', Object.assign({ id: 'gate' }, S.gate)); S.dirty = true; scheduleSync();
+  await showRecoveryCode(code); renderSettings();
 }
 async function askNewPassword(title) {
   const p1 = await ask(title, '', 'password'); if (!p1) return null;
@@ -231,6 +244,18 @@ async function gateCreate() {
   await gateSet(p); toast('Contraseña guardada'); return true;
 }
 async function gateForgot() {
+  const m = await dialog('Recuperar la contraseña', el('p', { textContent: 'Elige cómo comprobar que eres tú:\n\n• Código de recuperación: el que se te mostró al crear la contraseña.\n• Cuenta de Google + huella/PIN del teléfono: tu cuenta debe ser la de la app y el teléfono debe verificar tu huella, PIN o patrón.' }), [{ t: 'Cancelar', v: null }, { t: 'Google + teléfono', v: 'g' }, { t: 'Código', v: 'c' }]);
+  if (!m) return false;
+  if (m === 'c') {
+    if (!S.gate || !S.gate.rh) { await info('Sin código', 'Esta contraseña se creó sin código de recuperación. Usa Google + teléfono.'); return false; }
+    const c = await ask('Código de recuperación', '', 'text'); if (!c) return false;
+    if ((await hashPin(normCode(c), unb64(S.gate.rs))) !== S.gate.rh) { toast('Código incorrecto'); return false; }
+    const p = await askNewPassword('Elige la contraseña nueva'); if (!p) return false;
+    await gateSet(p, true); toast('Contraseña nueva guardada'); return true;
+  }
+  return gateForgotGoogle();
+}
+async function gateForgotGoogle() {
   const expected = ((S.gate && S.gate.email) || pref('gemail') || '').trim().toLowerCase();
   if (!pref('gclient') || !expected) { await info('No se puede recuperar', 'Para recuperarla hace falta tener configurados el ID de cliente de Google y tu correo en Ajustes. Se hace una sola vez, antes de olvidar la contraseña.'); return false; }
   if (!(await confirmD(`Para elegir una contraseña nueva iniciarás sesión con tu cuenta de Google (${expected}) y confirmarás con la huella, el PIN o el patrón del teléfono. ¿Continuar?`))) return false;
@@ -1202,6 +1227,7 @@ function renderSettings() {
   sec('Seguridad');
   item('Bloqueo de la app', lock.on ? (lock.bio ? 'PIN y huella' : 'PIN') : 'Desactivado', lockMenu);
   item('Contraseña de acceso a las notas ocultas', S.gate ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla', gateChange);
+  item('Código de recuperación', S.gate && S.gate.rh ? 'Creado · toca para generar uno nuevo (el anterior deja de valer)' : 'Sin código · toca para crearlo', gateNewCode);
   item('Abrir las notas ocultas con la huella', pref('gate_bio') === '1' ? 'Activado' : 'Desactivado', () => gateBioToggle(pref('gate_bio') !== '1').then(renderSettings));
   if (S.notes.some(n => n.enc)) item('Convertir las notas cifradas antiguas', S.notes.filter(n => n.enc).length + ' nota(s) cifradas · quita el cifrado y las protege solo con la contraseña de acceso', gateMigrate);
   if (S.notes.some(n => n.enc)) item('Contraseña de las notas cifradas (antigua)', pwvGet() ? 'Configurada · toca para cambiarla' : 'No configurada · toca para crearla (una sola para todas las notas cifradas)', masterSetup);
@@ -1814,7 +1840,7 @@ async function recDriveLoad(rid) {
 // Segundo factor local: huella / PIN / patrón del dispositivo (WebAuthn con verificación de usuario obligatoria).
 // Usa una credencial propia de la recuperación ('rec_cred'); si no existe se crea (el propio alta pide la verificación).
 async function recVerify() {
-  if (!(await bio.available())) return await confirmD('Este dispositivo no tiene huella, PIN ni patrón de bloqueo, así que no puedo pedirlo. Sin eso, la recuperación solo queda protegida por tu cuenta de Google abierta en este navegador. ¿Continuar igualmente?');
+  if (!(await bio.available())) { await info('No se puede verificar', 'Este dispositivo no ofrece huella, PIN ni patrón de bloqueo' + (window.__bioErr ? ' (detalle: ' + window.__bioErr + ')' : '') + ', así que no puedo comprobar que eres tú y por seguridad no continúo. Usa el código de recuperación.'); return false; }
   try {
     const cred = pref('rec_cred');
     if (cred) { try { await bio.assert(false, cred); return true; } catch (e) { if (e && e.name === 'NotAllowedError' && !/not.*found|no.*credential/i.test(e.message || '')) throw e; } }

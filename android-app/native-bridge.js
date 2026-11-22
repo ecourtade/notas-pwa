@@ -57,7 +57,7 @@
   const so = window.googleSignOut; if (typeof so === 'function') window.googleSignOut = async function () { pref('g_refresh', ''); return so.apply(this, arguments); };
 
   // --- Huella / patrón / PIN del teléfono (en lugar de WebAuthn, que el WebView no ofrece)
-  bio.available = async () => { try { const r = await BA.checkBiometry(); return !!(r.isAvailable || r.deviceIsSecure); } catch (e) { return false; } };
+  bio.available = async () => { try { const r = await BA.checkBiometry(); window.__bioErr = r.isAvailable || r.deviceIsSecure ? '' : 'sin huella ni bloqueo de pantalla (' + (r.reason || r.code || 'desconocido') + ')'; return !!(r.isAvailable || r.deviceIsSecure); } catch (e) { window.__bioErr = 'plugin: ' + (e && e.message || e); return false; } };
   bio.register = async () => { pref('bio_cred', 'native'); };
   bio.assert = async () => {
     try { await BA.authenticate({ reason: 'Desbloquear', cancelTitle: 'Cancelar', allowDeviceCredential: true, androidTitle: 'Audio Manager', androidSubtitle: 'Confirma que eres tú' }); }
@@ -65,7 +65,7 @@
     return { prf: null };
   };
   window.recVerify = async function () {
-    if (!(await bio.available())) return await confirmD('Este teléfono no tiene huella, PIN ni patrón de bloqueo, así que no puedo pedirlo. ¿Continuar igualmente?');
+    if (!(await bio.available())) { await info('No se puede verificar', 'Este teléfono no ofrece huella, PIN ni patrón (detalle: ' + (window.__bioErr || '?') + '). Por seguridad no continúo: usa el código de recuperación.'); return false; }
     try { await bio.assert(); return true; } catch (e) { return false; }
   };
 
