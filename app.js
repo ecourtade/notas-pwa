@@ -266,7 +266,7 @@ async function gateForgotGoogle() {
   } catch (e) { toast('No se pudo iniciar sesión en Google: ' + (e.message || e)); return false; }
   if (!(await recVerify())) return false;
   const p = await askNewPassword('Elige la contraseña nueva'); if (!p) return false;
-  await gateSet(p); toast('Contraseña nueva guardada'); return true;
+  await gateSet(p, true); toast('Contraseña nueva guardada'); return true;
 }
 async function gateAuth() {
   if (gateSess) return true;
@@ -297,7 +297,7 @@ async function gateChange() {
   if (!S.gate) { if (await gateCreate()) renderSettings(); return; }
   if (!(await gateAuth())) return;
   const p = await askNewPassword('Contraseña de acceso nueva'); if (!p) return;
-  await gateSet(p); toast('Contraseña cambiada'); renderSettings();
+  await gateSet(p, true); toast('Contraseña cambiada'); renderSettings();
 }
 async function toggleProt() {
   const n = S.cur; if (!n) return;
