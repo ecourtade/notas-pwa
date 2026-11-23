@@ -54,6 +54,13 @@
   };
   // El navegador del sistema se cierra sin avisar si el usuario vuelve atrás: no dejar la promesa colgada
   APP.addListener('appStateChange', s => { if (s.isActive && pendingAuth) setTimeout(() => { if (pendingAuth) { const p = pendingAuth; pendingAuth = null; p.rej(new Error('Cancelaste el inicio de sesión')); } }, 4000); });
+  // Salir de la app: cierra la actividad (al volver a abrirla empieza de cero, con el ecualizador)
+  window.appExit = async () => { try { await flush(); } catch (e) {} APP.exitApp(); };
+  // Botón «atrás»: dentro de la app retrocede; en la pantalla principal (o sobre el ecualizador) sale
+  APP.addListener('backButton', () => {
+    const eqUp = $('eq') && !$('eq').hidden, ovUp = $('overlay') && !$('overlay').hidden;
+    if (!eqUp && (ovUp || (S.stack && S.stack.length > 1))) history.back(); else window.appExit();
+  });
   const so = window.googleSignOut; if (typeof so === 'function') window.googleSignOut = async function () { pref('g_refresh', ''); return so.apply(this, arguments); };
 
   // --- Huella / patrón / PIN del teléfono (en lugar de WebAuthn, que el WebView no ofrece)

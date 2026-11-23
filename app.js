@@ -522,6 +522,7 @@ function mainMenu() {
     S.view.kind === 'trash' ? { t: 'Restaurar todas las notas de la papelera', fn: () => restoreFromTrash(S.notes.filter(n => n.deleted)) } : null,
     S.view.kind === 'trash' ? { t: 'Vaciar papelera', fn: emptyTrash } : null,
     '-', { t: 'Ajustes', fn: () => { renderSettings(); openScreen('settings'); } },
+    window.appExit ? { t: 'Salir', fn: () => window.appExit() } : null,
   ]);
 }
 function sortMenu() {
