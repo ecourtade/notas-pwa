@@ -3,7 +3,7 @@
 (function () {
   const C = window.Capacitor;
   if (!C || !C.isNativePlatform || !C.isNativePlatform()) return;
-  const P = C.Plugins, FS = P.Filesystem, LN = P.LocalNotifications, BA = P.BiometricAuth, APP = P.App, BR = P.Browser;
+  const P = C.Plugins, FS = P.Filesystem, LN = P.LocalNotifications, BA = P.BiometricAuthNative || P.BiometricAuth, APP = P.App, BR = P.Browser;
   window.NATIVE_APP = true;
   const REDIRECT = 'com.ecourtade.audiomanager:/oauth2redirect';
 
@@ -67,7 +67,7 @@
   bio.available = async () => { try { const r = await BA.checkBiometry(); window.__bioErr = r.isAvailable || r.deviceIsSecure ? '' : 'sin huella ni bloqueo de pantalla (' + (r.reason || r.code || 'desconocido') + ')'; return !!(r.isAvailable || r.deviceIsSecure); } catch (e) { window.__bioErr = 'plugin: ' + (e && e.message || e); return false; } };
   bio.register = async () => { pref('bio_cred', 'native'); };
   bio.assert = async () => {
-    try { await BA.authenticate({ reason: 'Desbloquear', cancelTitle: 'Cancelar', allowDeviceCredential: true, androidTitle: 'Audio Manager', androidSubtitle: 'Confirma que eres tú' }); }
+    try { await BA.internalAuthenticate({ reason: 'Desbloquear', cancelTitle: 'Cancelar', allowDeviceCredential: true, androidTitle: 'Audio Manager', androidSubtitle: 'Confirma que eres tú' }); }
     catch (e) { const err = new Error(e.message || 'Cancelado'); err.name = 'NotAllowedError'; throw err; }
     return { prf: null };
   };
